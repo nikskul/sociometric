@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Социометрия по Морено</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128101;</text></svg>">
+</head>
+<body>
+<header class="topbar">
+    <div class="brand">
+        <h1>Социометрия по Я. Морено</h1>
+        <p class="subtitle">Подсчёт социометрических статусов, индексов группы и социограммы</p>
+    </div>
+    <div class="survey-picker">
+        <label for="surveySelect">Опрос</label>
+        <select id="surveySelect"></select>
+        <button id="btnNewSurvey" class="btn btn-primary">+ Новый</button>
+        <button id="btnDeleteSurvey" class="btn btn-ghost" title="Удалить опрос">Удалить</button>
+    </div>
+</header>
+
+<nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="settings">Опрос</button>
+    <button class="tab" data-tab="entry">Ввод данных</button>
+    <button class="tab" data-tab="import">Импорт</button>
+    <button class="tab" data-tab="results">Результаты</button>
+    <button class="tab" data-tab="sociogram">Социограмма</button>
+    <button class="tab" data-tab="experts">Эксперты</button>
+</nav>
+
+<main id="main">
+
+    <!-- ================= ОПРОС ================= -->
+    <section class="panel" id="panel-settings">
+        <div class="card">
+            <h2>Параметры опроса</h2>
+            <div class="grid-2">
+                <label>Название
+                    <input id="sName" type="text" placeholder="8А класс, весна 2026">
+                </label>
+                <label>Сколько участников можно выбрать
+                    <input id="sLimit" type="number" min="1" max="20" value="3">
+                </label>
+            </div>
+            <label>Описание
+                <textarea id="sDescription" rows="2" placeholder="Условия проведения, дата, кто проводил"></textarea>
+            </label>
+            <div class="checks">
+                <label><input id="sAntipathy" type="checkbox"> Собирать антипатии («с кем бы НЕ хотел»)</label>
+                <label><input id="sRanks" type="checkbox"> Ранжированный опросник (порядок выбора важен)</label>
+                <label><input id="sAuto" type="checkbox" checked> Границы категорий по среднему ± σ</label>
+            </div>
+            <fieldset id="thresholdsBox">
+                <legend>Границы категорий вручную</legend>
+                <div class="grid-4">
+                    <label>Звезда, от
+                        <input id="thStar" type="number" min="0" value="3"></label>
+                    <label>Предпочитаемый, от
+                        <input id="thPreferred" type="number" min="0" value="2"></label>
+                    <label>Принятый, от
+                        <input id="thAccepted" type="number" min="0" value="1"></label>
+                    <label>Наиболее отвергаемый, от
+                        <input id="thMostRejected" type="number" min="1" value="2"></label>
+                </div>
+            </fieldset>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Участники</h2>
+                <div class="row-actions">
+                    <button id="btnAddParticipant" class="btn">+ Участник</button>
+                    <button id="btnBulkParticipants" class="btn btn-ghost">Массово (по именам)</button>
+                </div>
+            </div>
+            <p class="hint">Код участника — это номер в матрице: он же подпись в социограмме. Коды должны быть уникальны.</p>
+            <table class="grid" id="participantsTable">
+                <thead>
+                <tr><th style="width:60px">№</th><th style="width:140px">Код</th><th>Имя</th><th style="width:60px"></th></tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+            <div class="card-actions">
+                <button id="btnSaveSurvey" class="btn btn-primary">Сохранить опрос</button>
+                <span id="settingsStatus" class="status"></span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= ВВОД ДАННЫХ ================= -->
+    <section class="panel hidden" id="panel-entry">
+        <div class="card">
+            <h2>Форма участника</h2>
+            <p class="hint">Отметьте, кого участник выбрал. Отметки сохраняются сразу и ограничиваются лимитом выше.</p>
+            <div class="respondent-nav">
+                <button id="btnPrevResp" class="btn btn-ghost">← Предыдущий</button>
+                <select id="respondentSelect" class="grow"></select>
+                <button id="btnNextResp" class="btn btn-ghost">Следующий →</button>
+            </div>
+            <div id="respondentHead" class="respondent-head"></div>
+            <div class="choice-block">
+                <h3>С кем хотел бы быть в группе <span class="counter" id="symCounter"></span></h3>
+                <div id="symChoices" class="chips"></div>
+            </div>
+            <div class="choice-block hidden" id="antiBlock">
+                <h3>С кем НЕ хотел бы быть в группе <span class="counter" id="antiCounter"></span></h3>
+                <div id="antiChoices" class="chips"></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="card-head">
+                <h2>Социометрическая матрица</h2>
+                <div class="row-actions">
+                    <select id="matrixKind" class="inline-select">
+                        <option value="SYMPATHY">Симпатии</option>
+                        <option value="ANTIPATHY">Антипатии</option>
+                    </select>
+                    <button id="btnClearMatrix" class="btn btn-ghost">Очистить</button>
+                </div>
+            </div>
+            <p class="hint">Строка — кто выбирает, столбец — кого выбирают. Щелчок по клетке переключает выбор.
+                Подсвечены взаимные пары.</p>
+            <div class="matrix-wrap">
+                <table class="matrix" id="matrixTable"></table>
+            </div>
+            <div class="legend">
+                <span><i class="swatch mutual"></i> взаимный выбор</span>
+                <span><i class="swatch single"></i> односторонний выбор</span>
+                <span><i class="swatch self"></i> диагональ (себя выбрать нельзя)</span>
+            </div>
+            <div class="card-actions">
+                <span id="entryStatus" class="status"></span>
+            </div>
+        </div>
+    </section>
+
+    <!-- ================= ИМПОРТ ================= -->
+    <section class="panel hidden" id="panel-import">
+        <div class="card">
+            <h2>Загрузка результатов из файла</h2>
+            <p class="hint">Поддерживаются CSV и XLSX в двух форматах.</p>
+            <div class="grid-2">
+                <div>
+                    <h3>Длинный формат</h3>
+                    <p class="hint">По строке один выбор. Колонки <code>type, respondent, target, rank</code>,
+                        где type — SYMPATHY или ANTIPATHY, rank — место в предпочтении (необязательно).</p>
+                    <pre class="code">type,respondent,target,rank
+SYMPATHY,1,2,1
+SYMPATHY,1,3,2
+ANTIPATHY,1,12,1</pre>
+                </div>
+                <div>
+                    <h3>Широкий формат (сама матрица)</h3>
+                    <p class="hint">Первая колонка — код выбирающего, остальные — коды участников.
+                        Значение 1 — выбрал, 0 — нет, число больше 1 трактуется как ранг.</p>
+                    <pre class="code">;1;2;3
+1;0;1;1
+2;1;0;1
+3;1;1;0</pre>
+                </div>
+            </div>
+            <div class="dropzone" id="dropzone">
+                <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
+                <p><strong>Перетащите файл</strong> или <button class="linklike" id="btnPickFile">выберите на диске</button></p>
+                <p class="hint">Коды участников в файле должны совпадать с кодами на вкладке «Опрос».</p>
+            </div>
+            <div class="checks">
+                <label><input id="importReplace" type="checkbox"> Заменить все уже загруженные данные</label>
+            </div>
+            <div class="card-actions">
+                <button id="btnTemplate" class="btn">Скачать шаблон CSV</button>
+                <button id="btnImport" class="btn btn-primary" disabled>Загрузить</button>
+                <span id="importStatus" class="status"></span>
+            </div>
+            <div id="importReport"></div>
+        </div>
+    </section>
+
+    <!-- ================= РЕЗУЛЬТАТЫ ================= -->
+    <section class="panel hidden" id="panel-results">
+        <div class="card no-print">
+            <div class="card-head">
+                <h2 id="resultTitle">Результаты</h2>
+                <div class="row-actions">
+                    <button id="btnRecalc" class="btn btn-ghost">Пересчитать</button>
+                    <button id="btnExportCsv" class="btn">Экспорт CSV</button>
+                    <button id="btnExportXlsx" class="btn">Экспорт Excel</button>
+                    <button id="btnPrint" class="btn">Печать отчёта</button>
+                </div>
+            </div>
+            <div class="checks">
+                <label><input id="showAnti" type="checkbox" checked> Показывать антипатии</label>
+                <label><input id="onlyResponded" type="checkbox"> Только ответившие</label>
+            </div>
+        </div>
+        <div id="resultContent"></div>
+    </section>
+
+    <!-- ================= СОЦИОГРАММА ================= -->
+    <section class="panel hidden" id="panel-sociogram">
+        <div class="card no-print">
+            <h2>Социограмма</h2>
+            <div class="grid-4">
+                <label>Раскладка
+                    <select id="socLayout">
+                        <option value="concentric">Круг в круге (классическая)</option>
+                        <option value="star">Звезда и орбита</option>
+                        <option value="circle">Один круг</option>
+                    </select>
+                </label>
+                <label>Показывать стрелки
+                    <select id="socArrows">
+                        <option value="mutual">Только взаимные</option>
+                        <option value="all">Все выборы</option>
+                        <option value="none">Без стрелок</option>
+                    </select>
+                </label>
+                <label>Скрыть категории
+                    <select id="socHide">
+                        <option value="">Ничего</option>
+                        <option value="ISOLATED,REJECTED,OUTSIDER">Изолированных и отвергаемых</option>
+                        <option value="REJECTED,OUTSIDER">Только отвергаемых</option>
+                    </select>
+                </label>
+                <label class="align-bottom">
+                    <button id="btnSocSvg" class="btn">Скачать SVG</button>
+                    <button id="btnSocPng" class="btn">Скачать PNG</button>
+                </label>
+            </div>
+            <div class="checks">
+                <label><input id="socAntipathy" type="checkbox"> Стрелки антипатий (пунктир)</label>
+                <label><input id="socNames" type="checkbox" checked> Подписи участников</label>
+            </div>
+        </div>
+        <div class="card">
+            <div id="sociogramWrap" class="sociogram-wrap"></div>
+            <div class="legend legend-sociogram" id="socLegend"></div>
+        </div>
+    </section>
+
+    <!-- ================= ЭКСПЕРТЫ ================= -->
+    <section class="panel hidden" id="panel-experts">
+        <div class="card">
+            <div class="card-head">
+                <h2>Оценки популярности экспертами</h2>
+                <div class="row-actions">
+                    <button id="btnAddExpert" class="btn">+ Эксперт</button>
+                    <button id="btnClearExperts" class="btn btn-ghost">Очистить</button>
+                    <button id="btnSaveExperts" class="btn btn-primary">Сохранить</button>
+                </div>
+            </div>
+            <p class="hint">Независимый от социометрии метод оценки. Позволяет проверить согласованность
+                экспертов и сопоставить их оценки с реальным статусом участника.</p>
+            <div class="matrix-wrap">
+                <table class="matrix" id="expertsTable"></table>
+            </div>
+            <span id="expertsStatus" class="status"></span>
+        </div>
+        <div class="card" id="expertStatsCard">
+            <h2>Согласованность и корреляции</h2>
+            <div id="expertStats"></div>
+        </div>
+    </section>
+
+</main>
+
+<div id="toast" class="toast hidden"></div>
+
+<dialog id="bulkDialog">
+    <form method="dialog">
+        <h3>Массовое добавление участников</h3>
+        <p class="hint">По одному участнику в строке. Код можно указать через двоеточие: <code>12:Анна</code>,
+            иначе кодом станет порядковый номер.</p>
+        <textarea id="bulkText" rows="10" placeholder="Анна&#10;Борис&#10;Вера"></textarea>
+        <div class="card-actions">
+            <button value="cancel" class="btn btn-ghost">Отмена</button>
+            <button id="btnBulkApply" value="apply" class="btn btn-primary">Добавить</button>
+        </div>
+    </form>
+</dialog>
+
+<script src="sociogram.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
