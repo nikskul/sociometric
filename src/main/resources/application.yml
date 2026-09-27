@@ -7,7 +7,9 @@ spring:
   application:
     name: sociometric
   datasource:
-    url: jdbc:h2:file:./data/sociometric;DB_CLOSE_ON_EXIT=FALSE
+    # Каталог базы переопределяется переменной окружения: настольная сборка
+    # кладёт базу в профиль пользователя, а не в рабочий каталог ярлыка.
+    url: ${SOCIOMETRIC_DB_URL:jdbc:h2:file:./data/sociometric;DB_CLOSE_ON_EXIT=FALSE}
     driver-class-name: org.h2.Driver
     username: sa
     password: ""
@@ -39,3 +41,23 @@ sociometric:
   #   mutualDoublePass - GSC = sum(A[i][j]*A[j][i]) / (n*(n-1))
   gsc-formula: mutual
   demo-data-on-startup: true
+
+---
+# Настольная сборка запускается без окна консоли, поэтому журнал нужен в файле.
+# Пишется рядом с базой, путь задаёт лаунчер.
+spring:
+  config:
+    activate:
+      on-profile: desktop
+
+server:
+  # Только свой компьютер. Без этого Spring Boot слушает все интерфейсы, и
+  # приложение открывается любому, кто в той же сети: аутентификации у него
+  # нет, а данные опросов чувствительные.
+  address: 127.0.0.1
+
+logging:
+  file:
+    name: ${SOCIOMETRIC_LOG:./sociometric.log}
+  pattern:
+    file: "%d{HH:mm:ss.SSS} %-5level %-32logger{32} %m%n"

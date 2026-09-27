@@ -21,6 +21,16 @@
         <java.version>21</java.version>
         <poi.version>5.4.1</poi.version>
         <commons-csv.version>1.14.1</commons-csv.version>
+
+        <!-- Точка входа настольной сборки. Обычная разработка её не трогает:
+             без профиля desktop приложение поднимается обычным сервером. -->
+        <desktop.mainClass>ru.sociometric.desktop.DesktopLauncher</desktop.mainClass>
+
+        <!-- Проверки фронтенда. На Unix их гоняет bash-обёртка, которая
+             молча пропускает их при отсутствии node. На Windows bash может не
+             быть в PATH, поэтому запускаем node напрямую (профилем on-windows). -->
+        <frontend.runner>bash</frontend.runner>
+        <frontend.script>${project.basedir}/run-frontend-tests.sh</frontend.script>
     </properties>
 
     <dependencies>
@@ -83,9 +93,9 @@
                             <goal>exec</goal>
                         </goals>
                         <configuration>
-                            <executable>bash</executable>
+                            <executable>${frontend.runner}</executable>
                             <arguments>
-                                <argument>${project.basedir}/run-frontend-tests.sh</argument>
+                                <argument>${frontend.script}</argument>
                             </arguments>
                             <skip>${skipTests}</skip>
                         </configuration>
@@ -98,4 +108,170 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!-- Windows: bash в PATH может не быть, поэтому проверки фронтенда
+             запускаются node напрямую. -->
+        <profile>
+            <id>on-windows</id>
+            <activation>
+                <os>
+                    <family>windows</family>
+                </os>
+            </activation>
+            <properties>
+                <frontend.runner>node</frontend.runner>
+                <frontend.script>${project.basedir}/src/test/js/run.js</frontend.script>
+            </properties>
+        </profile>
+
+        <!-- Настольная сборка: главным классом становится лаунчер, который
+             поднимает сервис на свободном порту, открывает браузер и кладёт
+             значок в трей. Обычная сборка и запуск из IDE не меняются: там
+             по-прежнему работает сервер на 8080.
+
+             Профиль нужен и для jpackage: он подставляет точку входа в
+             Start-Class, а именно его читает установщик при запуске. -->
+        <profile>
+            <id>desktop</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <configuration>
+                            <mainClass>${desktop.mainClass}</mainClass>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+
+        <!-- Переносимое приложение для Windows: одна папка с .exe внутри.
+
+             Запуск:  mvn clean verify -DwindowsApp
+
+             Профиль включается только на Windows И только по запросу -DwindowsApp,
+             поэтому обычная сборка ни на чём не меняется, а на Linux такая
+             команда просто соберёт проект как обычно.
+
+             Требуется JDK 21 (именно JDK: jpackage не входит в JRE) и node
+             для проверок фронтенда. -->
+        <profile>
+            <id>windows-app</id>
+            <activation>
+                <os>
+                    <family>windows</family>
+                </os>
+                <property>
+                    <name>windowsApp</name>
+                </property>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.springframework.boot</groupId>
+                        <artifactId>spring-boot-maven-plugin</artifactId>
+                        <configuration>
+                            <mainClass>${desktop.mainClass}</mainClass>
+                        </configuration>
+                    </plugin>
+
+                    <!-- В app-image попадает ровно один jar. Если отдать
+                         jpackage весь target, внутрь приложения затянутся
+                         target/classes и test-classes — лишние мегабайты и
+                         мусор в папке, которую пользователь будет переносить. -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>stage-windows-input</id>
+                                <!-- verify, а не package: к этому моменту
+                                     repackage уже заменил jar на собранный -->
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${project.build.directory}/windows-input</outputDirectory>
+                                    <overwrite>true</overwrite>
+                                    <resources>
+                                        <resource>
+                                            <directory>${project.build.directory}</directory>
+                                            <filtering>false</filtering>
+                                            <includes>
+                                                <include>${project.build.finalName}.jar</include>
+                                            </includes>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>jpackage-windows</id>
+                                <!-- после copy-resources: папка с jar уже есть -->
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>jpackage</executable>
+                                    <arguments>
+                                        <argument>--type</argument>
+                                        <argument>app-image</argument>
+                                        <argument>--name</argument>
+                                        <argument>Sociometric</argument>
+                                        <argument>--app-version</argument>
+                                        <argument>${project.version}</argument>
+                                        <argument>--vendor</argument>
+                                        <argument>Sociometric</argument>
+                                        <!-- Только ASCII: не-ASCII в метаданных
+                                             установщика зависит от кодовой
+                                             страницы консоли Windows -->
+                                        <argument>--description</argument>
+                                        <argument>Sociometry by J. Moreno</argument>
+                                        <argument>--input</argument>
+                                        <argument>${project.build.directory}/windows-input</argument>
+                                        <!-- Обязателен: без указания главного jar
+                                             jpackage не знает точку входа и
+                                             прерывает сборку. Явно задавать
+                                             главный класс не нужно: точку входа
+                                             берём из манифеста jar, а это
+                                             JarLauncher, он лежит в корне jar и
+                                             доступен через classpath. Сам класс
+                                             лаунчера внутри BOOT-INF/classes и
+                                             через classpath не находится. -->
+                                        <argument>--main-jar</argument>
+                                        <argument>${project.build.finalName}.jar</argument>
+                                        <argument>--dest</argument>
+                                        <argument>${project.build.directory}/windows</argument>
+                                        <argument>--icon</argument>
+                                        <argument>${project.basedir}/src/main/windows/sociometric.ico</argument>
+                                        <argument>--java-options</argument>
+                                        <argument>-Xms64m</argument>
+                                        <!-- -Xmx1g: экспорт в Excel и импорт
+                                             больших групп требуют запаса -->
+                                        <argument>--java-options</argument>
+                                        <argument>-Xmx1g</argument>
+                                        <argument>--java-options</argument>
+                                        <argument>-Dfile.encoding=UTF-8</argument>
+                                        <!-- трею и открытию браузера нужен AWT -->
+                                        <argument>--java-options</argument>
+                                        <argument>-Djava.awt.headless=false</argument>
+                                    </arguments>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

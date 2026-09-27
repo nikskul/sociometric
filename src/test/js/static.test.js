@@ -15,6 +15,7 @@ const vm = require('vm');
 const assert = require('assert');
 
 const STATIC = path.join(__dirname, '..', '..', 'main', 'resources', 'static');
+const ROOT = path.join(__dirname, '..', '..', '..');
 const html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
 const files = fs.readdirSync(STATIC).filter(f => /\.(js|css|html)$/.test(f));
@@ -192,6 +193,26 @@ check('интерактивные элементы объявлены, а рез
         'нет правила prefers-reduced-motion');
     assert.ok(/:focus-visible/.test(fs.readFileSync(path.join(STATIC, 'styles.css'), 'utf8')),
         'нет видимого фокуса :focus-visible');
+});
+
+check('сборка Windows описана в pom и значок на месте', () => {
+    // Скрипт на PowerShell удалён: переносимое приложение собирает сам Maven
+    // профилем windows-app. Проверяем, что конфигурация на месте.
+    const pom = fs.readFileSync(path.join(ROOT, 'pom.xml'), 'utf8');
+    assert.ok(/<id>windows-app<\/id>/.test(pom), 'в pom нет профиля windows-app');
+    assert.ok(pom.includes('jpackage'), 'профиль не вызывает jpackage');
+    assert.ok(pom.includes('--main-jar'),
+        'jpackage требует --main-jar: без него он не знает точку входа');
+    assert.ok(/<family>windows<\/family>/.test(pom), 'профиль не ограничен Windows');
+
+    const icon = path.join(ROOT, 'src', 'main', 'windows', 'sociometric.ico');
+    assert.ok(fs.existsSync(icon), 'нет значка ' + icon);
+    const head = fs.readFileSync(icon).subarray(0, 4);
+    assert.deepStrictEqual([...head], [0x00, 0x00, 0x01, 0x00],
+        'файл значка не ICO');
+
+    assert.ok(!fs.existsSync(path.join(ROOT, 'build-windows.ps1')),
+        'скрипт PowerShell удалён, но он снова появился в корне');
 });
 
 console.log(results.join('\n'));
