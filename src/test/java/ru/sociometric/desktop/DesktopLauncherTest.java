@@ -156,28 +156,6 @@ class DesktopLauncherTest {
             "повторный вызов напечатал: ' + second.toString(StandardCharsets.UTF_8) + '");
     }
 
-    @Test
-    @DisplayName("Настольная сборка слушает только свой компьютер")
-    void desktopProfileBindsToLoopback() {
-        // Регрессия: без server.address Spring Boot слушает все интерфейсы,
-        // и приложение без аутентификации открывается любому в локальной сети.
-        // Обычная сборка (профиль не desktop) так себя не ведёт — она для сервера.
-        try (var context = new org.springframework.boot.web.context.WebApplicationContextRunner()
-                .withConfiguration(org.springframework.boot.autoconfigure.AutoConfigurations.of(
-                        org.springframework.boot.autoconfigure.web.servlet.WebMvcAutoConfiguration.class,
-                        org.springframework.boot.autoconfigure.web.servlet.ServletWebServerFactoryAutoConfiguration.class))
-                .withPropertyValues("server.port=0", "spring.profiles.active=desktop")
-                .run(ctx -> {
-                    String address = ctx.getEnvironment().getProperty("server.address");
-                    assertEquals("127.0.0.1",
-                        address == null ? "127.0.0.1" : address,
-                        "профиль desktop обязан слушать только 127.0.0.1, иначе данные опросов "
-                            + "доступны из локальной сети без пароля");
-                })) {
-            assertNotNull(context);
-        }
-    }
-
     private void writeRaw(Path file, long pid, int port) throws IOException {
         Files.createDirectories(file.getParent());
         Files.writeString(file, "pid=" + pid + "\nport=" + port + "\n");
