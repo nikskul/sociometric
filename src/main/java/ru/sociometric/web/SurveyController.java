@@ -22,6 +22,8 @@ import ru.sociometric.service.ImportService;
 import ru.sociometric.service.ResultService;
 import ru.sociometric.service.SurveyService;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -115,9 +117,9 @@ public class SurveyController {
 
     @GetMapping(value = "/{id}/template.csv", produces = "text/csv")
     public ResponseEntity<byte[]> template(@PathVariable Long id) {
-        byte[] body = imports.buildTemplate(id).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] body = imports.buildTemplate(id).getBytes(StandardCharsets.UTF_8);
         return ResponseEntity.ok()
-                .header("Content-Disposition", "attachment; filename=\"template.csv\"")
+                .header("Content-Disposition", contentDisposition("template.csv"))
                 .body(body);
     }
 
@@ -132,8 +134,53 @@ public class SurveyController {
                 : "text/csv; charset=UTF-8";
         return ResponseEntity.ok()
                 .header("Content-Type", contentType)
-                .header("Content-Disposition", "attachment; filename=\"" + name + "\"")
+                .header("Content-Disposition", contentDisposition(name))
                 .body(body);
+    }
+
+    /**
+     * Заголовок Content-Disposition с именем файла.
+     *
+     * <p>Имя опроса — произвольный русский текст, а HTTP-заголовки Tomcat
+     * записывает в ISO-8859-1. Кириллица оттуда вылетает с
+     * «Unicode character cannot be encoded», и в ответе не остаётся вообще
+     * ничего — файл скачивается без имени, а в лог падает стектрейс. Поэтому
+     * рядом кладём читаемое ASCII-имя, а точное отдаём через RFC 5987.
+     */
+    private static String contentDisposition(String filename) {
+        String ascii = transliterate(filename);
+        String encoded = URLEncoder.encode(filename, StandardCharsets.UTF_8).replace("+", "%20");
+        return "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''" + encoded;
+    }
+
+    /** Русские буквы — латиницей, всё непечатное и служебное — подчёркиванием. */
+    private static String transliterate(String value) {
+        String[] cyrillic = {"а","б","в","г","д","е","ё","ж","з","и","й","к","л","м","н","о","п",
+                "р","с","т","у","ф","х","ц","ч","ш","щ","ъ","ы","ь","э","ю","я"};
+        String[] latin = {"a","b","v","g","d","e","e","zh","z","i","y","k","l","m","n","o","p",
+                "r","s","t","u","f","h","c","ch","sh","sch","","y","","e","yu","ya"};
+        StringBuilder out = new StringBuilder(value.length());
+        for (char c : value.toLowerCase().toCharArray()) {
+            if (c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
+                out.append(c);
+            } else if (c == '.' || c == '-' || c == '_' || c == ' ') {
+                out.append(c);
+            } else {
+                int index = indexOf(cyrillic, String.valueOf(c));
+                out.append(index < 0 ? "_" : latin[index]);
+            }
+        }
+        String ascii = out.toString().replaceAll("_+", "_").replaceAll("^_|_$", "");
+        return ascii.isBlank() ? "export" : ascii;
+    }
+
+    private static int indexOf(String[] haystack, String needle) {
+        for (int i = 0; i < haystack.length; i++) {
+            if (haystack[i].equals(needle)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     /** Справочник значений для интерфейса. */

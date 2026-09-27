@@ -9,9 +9,15 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+
 import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -102,7 +108,7 @@ class SurveyApiTest {
         mvc.perform(post("/api/surveys/" + id + "/choices")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
-                                {"kind":"SYMPATHY","replace":true,"choices":[
+                                {"replaceAll":true,"choices":[
                                   {"kind":"SYMPATHY","from":"1","to":"3","weight":1},
                                   {"kind":"ANTIPATHY","from":"2","to":"4","weight":1},
                                   {"kind":"ANTIPATHY","from":"3","to":"4","weight":1}]}
@@ -219,6 +225,41 @@ class SurveyApiTest {
                         org.hamcrest.Matchers.containsString("SYMPATHY,"))));
     }
 
+    /**
+     * Имя опроса по-русски, а заголовки HTTP Tomcat пишет в ISO-8859-1.
+     * Кириллица в Content-Disposition раньше роняла запись заголовка: файл
+     * приходил без имени, а в лог падал стектрейс про кодирование.
+     */
+    @Test
+    @DisplayName("Выгрузка с кириллическим названием отдаёт читаемое имя файла")
+    void exportKeepsCyrillicFileName() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "8А класс — учебный пример");
+
+        for (String format : new String[]{"csv", "xlsx"}) {
+            String disposition = mvc.perform(get("/api/surveys/" + id + "/export?format=" + format))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getHeader("Content-Disposition");
+
+            assertNotNull(disposition, "нет Content-Disposition для " + format);
+            // ASCII-запасное имя обязано оставаться читаемым, а не «________»
+            assertTrue(disposition.contains("filename=\""),
+                    "нет ASCII-имени: " + disposition);
+            String asciiName = disposition.replaceAll(".*filename=\"([^\"]*)\".*", "$1");
+            assertTrue(asciiName.matches("[\\x20-\\x7E]+"),
+                    "ASCII-имя содержит не-ASCII: " + asciiName);
+            assertTrue(asciiName.toLowerCase().endsWith("." + format),
+                    "ASCII-имя без расширения: " + asciiName);
+            // и точное имя по RFC 5987, чтобы браузер показал кириллицу
+            assertTrue(disposition.contains("filename*=UTF-8''"),
+                    "нет RFC 5987-имени: " + disposition);
+            String encoded = disposition.replaceAll(".*filename\\*=UTF-8''(.*)", "$1");
+            String decoded = URLDecoder.decode(encoded, StandardCharsets.UTF_8);
+            assertEquals("8А_класс_учебный_пример." + format, decoded,
+                    "имя файла исказилось при кодировании");
+        }
+    }
+
     @Test
     @DisplayName("Ответ без выборов сохраняется как ответ, а не теряется")
     void responseWithoutChoicesIsKept() throws Exception {
@@ -276,5 +317,138 @@ class SurveyApiTest {
 
         mvc.perform(get("/api/surveys/999999/result"))
                 .andExpect(status().isNotFound());
+    }
+
+    /**
+     * Регрессия: интерфейс держит матрицу в памяти целиком и после каждой правки
+     * переписывает её целиком. Раньше такой запрос просил заменить только симпатии,
+     * а присылал оба вида — и вторая подряд сохранённая правка падала на
+     * уникальном индексе (survey_id, respondent, target, kind).
+     */
+    @Test
+    @DisplayName("Полная перезапись выборов дважды подряд не ломается об антипатиях")
+    void replaceAllTwiceKeepsAntipathies() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Повторная перезапись");
+
+        String first = """
+                {"replaceAll":true,"respondent":"1","choices":[
+                  {"kind":"SYMPATHY","from":"1","to":"2","weight":1},
+                  {"kind":"SYMPATHY","from":"1","to":"3","weight":1},
+                  {"kind":"ANTIPATHY","from":"2","to":"4","weight":1}]}
+                """;
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON).content(first))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choicesCount").value(2))
+                .andExpect(jsonPath("$.antipathyCount").value(1));
+
+        // та же матрица плюс одна новая строка — антипатия из прошлого запроса
+        // остаётся на месте, а не пытается вставиться второй раз
+        String second = """
+                {"replaceAll":true,"respondent":"1","choices":[
+                  {"kind":"SYMPATHY","from":"1","to":"2","weight":1},
+                  {"kind":"SYMPATHY","from":"1","to":"3","weight":1},
+                  {"kind":"SYMPATHY","from":"1","to":"4","weight":1},
+                  {"kind":"ANTIPATHY","from":"2","to":"4","weight":1}]}
+                """;
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON).content(second))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choicesCount").value(3))
+                .andExpect(jsonPath("$.antipathyCount").value(1));
+    }
+
+    /** Старый контракт replace трактовал оба вида как один и падал на индексе. */
+    @Test
+    @DisplayName("replace с чужим видом выборов даёт понятную 400, а не 500")
+    void replaceRejectsMixedKinds() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Смешанные виды");
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"kind":"SYMPATHY","replace":true,"choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2"},
+                                  {"kind":"ANTIPATHY","from":"2","to":"4"}]}
+                                """))
+                .andExpect(status().isBadRequest());
+
+        // ничего не записалось: и симпатий, ни антипатий
+        mvc.perform(get("/api/surveys/" + id + "/choices"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+    }
+
+    /** Снятый выбор должен исчезнуть, а не остаться со второй перезаписи на месте. */
+    @Test
+    @DisplayName("Полная перезапись действительно удаляет снятые выборы")
+    void replaceAllRemovesDroppedChoices() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Снятие выбора");
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"replaceAll":true,"respondent":"1","choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2","weight":1},
+                                  {"kind":"SYMPATHY","from":"1","to":"3","weight":1},
+                                  {"kind":"SYMPATHY","from":"1","to":"4","weight":1},
+                                  {"kind":"ANTIPATHY","from":"2","to":"4","weight":1}]}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choicesCount").value(3))
+                .andExpect(jsonPath("$.antipathyCount").value(1));
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"replaceAll":true,"respondent":"1","choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2","weight":1},
+                                  {"kind":"ANTIPATHY","from":"2","to":"4","weight":1}]}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choicesCount").value(1))
+                .andExpect(jsonPath("$.antipathyCount").value(1));
+
+        mvc.perform(get("/api/surveys/" + id + "/choices"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(2));
+    }
+
+    /** Ранг и вес обновляются на месте: строка та же, но содержимое поменялось. */
+    @Test
+    @DisplayName("Полная перезапись обновляет ранг существующего выбора")
+    void replaceAllUpdatesRank() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Ранги");
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"replaceAll":true,"respondent":"1","choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2","rank":1,"weight":3},
+                                  {"kind":"SYMPATHY","from":"1","to":"3","rank":2,"weight":2}]}
+                                """))
+                .andExpect(status().isOk());
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"replaceAll":true,"respondent":"1","choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2","rank":2,"weight":2},
+                                  {"kind":"SYMPATHY","from":"1","to":"3","rank":1,"weight":3}]}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.choicesCount").value(2))
+                .andExpect(jsonPath("$.antipathyCount").value(0));
+
+        mvc.perform(get("/api/surveys/" + id + "/choices"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].rank").value(2))
+                .andExpect(jsonPath("$[0].weight").value(2))
+                .andExpect(jsonPath("$[1].rank").value(1))
+                .andExpect(jsonPath("$[1].weight").value(3));
     }
 }

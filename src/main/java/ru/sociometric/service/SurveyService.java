@@ -112,10 +112,6 @@ public class SurveyService {
         Set<String> codes = new LinkedHashSet<>();
         participants.forEach(participant -> codes.add(participant.code()));
 
-        if (request.replace() && request.kind() != null) {
-            choices.deleteBySurveyIdAndKind(id, ChoiceKind.valueOf(request.kind().name()));
-        }
-
         // отмечаем ответившим до проверки выборов: «отвечал, но никого не выбрал» —
         // это тоже ответ, и он не должен превращаться в «не ответил»
         if (request.respondent() != null && !request.respondent().isBlank()) {
@@ -126,8 +122,89 @@ public class SurveyService {
             markResponded(id, code);
         }
 
-        Set<String> seen = new LinkedHashSet<>();
-        List<Choice> entities = new ArrayList<>();
+        List<ParsedChoice> parsed = parseChoices(request, survey, codes);
+
+        if (request.replaceAll()) {
+            syncFullState(id, parsed);
+        } else if (request.replace()) {
+            // kind replace сносит только один вид, поэтому чужие строки в теле
+            // запроса — это не «лишнее», а ошибка клиента: без проверки вставка
+            // упала бы на уникальном индексе с невнятным 500
+            requireSameKind(request, parsed);
+            choices.deleteBySurveyIdAndKind(id, ChoiceKind.valueOf(request.kind().name()));
+            choices.saveAll(parsed.stream().map(choice -> choice.toEntity(id)).toList());
+        } else {
+            List<Choice> entities = new ArrayList<>();
+            for (ParsedChoice choice : parsed) {
+                entities.add(choice.toEntity(id));
+            }
+            choices.saveAll(entities);
+        }
+
+        // без явного respondent отвечавшими считаем всех, кто что-то выбрал
+        if (request.respondent() == null || request.respondent().isBlank()) {
+            parsed.stream().map(ParsedChoice::from).distinct().forEach(code -> markResponded(id, code));
+        }
+        survey.setUpdatedAt(Instant.now());
+        surveys.save(survey);
+        return toResponse(survey);
+    }
+
+    /**
+     * Естественный ключ строки выбора — ровно то, чем строка уникальна в
+     * {@code uk_choice}. Отдельная record, а не склейка строк: код участника —
+     * произвольный текст, так что разделитель пришлось бы как-то угадывать.
+     */
+    private record ChoiceRef(ChoiceKind kind, String from, String to) {
+    }
+
+    /** Разобранный и проверенный выбор: до момента сохранения это ещё не сущность. */
+    private record ParsedChoice(ChoiceKind kind, String from, String to, Integer rank, int weight) {
+
+        ChoiceRef ref() {
+            return new ChoiceRef(kind, from, to);
+        }
+
+        Choice toEntity(Long surveyId) {
+            Choice choice = new Choice(surveyId, from, to, kind);
+            choice.setRank(rank);
+            choice.setWeight(weight);
+            return choice;
+        }
+    }
+
+    private static ChoiceRef refOf(Choice choice) {
+        return new ChoiceRef(choice.getKind(), choice.getRespondent(), choice.getTarget());
+    }
+
+    /**
+     * У режима {@code replace} тело запроса должно состоять из одного вида
+     * выборов: сносит он тоже только один вид, и чужая строка осталась бы в базе,
+     * а повторная отправка упала бы на {@code uk_choice}.
+     */
+    private static void requireSameKind(ChoicesRequest request, List<ParsedChoice> parsed) {
+        if (request.kind() == null) {
+            throw new BadRequestException("Для замены выборов нужно указать kind: SYMPATHY или ANTIPATHY");
+        }
+        ChoiceKind kind = ChoiceKind.valueOf(request.kind().name());
+        for (ParsedChoice choice : parsed) {
+            if (choice.kind() != kind) {
+                throw new BadRequestException("kind=" + request.kind()
+                        + " заменяет только один вид выборов, а в запросе есть " + choice.kind()
+                        + " (" + choice.from() + " -> " + choice.to() + ")"
+                        + ". Чтобы перезаписать оба вида сразу, пришлите replaceAll=true");
+            }
+        }
+    }
+
+    /**
+     * Проверяет запрос и превращает его в список выборов. Ошибки накапливаются и
+     * выбрасываются одним исключением, чтобы не оставить опрос наполовину
+     * переписанным из-за первой же негодной строки.
+     */
+    private List<ParsedChoice> parseChoices(ChoicesRequest request, Survey survey, Set<String> codes) {
+        Set<ChoiceRef> seen = new LinkedHashSet<>();
+        List<ParsedChoice> parsed = new ArrayList<>();
         List<String> problems = new ArrayList<>();
         for (ChoicesRequest.ChoiceInput input : request.choices()) {
             ChoiceKind kind;
@@ -152,27 +229,60 @@ public class SurveyService {
                 problems.add("Участник " + input.from() + " не может выбрать самого себя — пропущено");
                 continue;
             }
-            String key = kind + "|" + input.from() + "|" + input.to();
-            if (!seen.add(key)) {
+            if (!seen.add(new ChoiceRef(kind, input.from(), input.to()))) {
                 continue;
             }
-            Choice choice = new Choice(id, input.from(), input.to(), kind);
-            choice.setRank(input.rank());
-            choice.setWeight(input.weight() == null || input.weight() <= 0 ? 1 : input.weight());
-            entities.add(choice);
+            int weight = input.weight() == null || input.weight() <= 0 ? 1 : input.weight();
+            parsed.add(new ParsedChoice(kind, input.from(), input.to(), input.rank(), weight));
         }
-
         if (!problems.isEmpty()) {
             throw new BadRequestException(String.join("; ", problems));
         }
-        choices.saveAll(entities);
-        // без явного respondent отвечавшими считаем всех, кто что-то выбрал
-        if (request.respondent() == null || request.respondent().isBlank()) {
-            entities.stream().map(Choice::getRespondent).distinct().forEach(code -> markResponded(id, code));
+        return parsed;
+    }
+
+    /**
+     * Приводит набор выборов в опросе к состоянию, описанному запросом.
+     *
+     * <p>Именно сравнение, а не «снести всё и вставить заново»: строки выборов
+     * уникальны по {@code (опрос, респондент, цель, вид)}, поэтому удалять и
+     * вставлять их по второму разу нельзя — вторая вставка упирается в
+     * уникальный индекс. Здесь незатронутые строки остаются на месте (id
+     * сохраняется), у изменившихся правится ранг и вес, и только по-настоящему
+     * исчезнувшие удаляются.
+     */
+    private void syncFullState(Long id, List<ParsedChoice> parsed) {
+        List<Choice> existing = choices.findBySurveyIdOrderById(id);
+        Map<ChoiceRef, Choice> byRef = new HashMap<>();
+        for (Choice choice : existing) {
+            byRef.put(refOf(choice), choice);
         }
-        survey.setUpdatedAt(Instant.now());
-        surveys.save(survey);
-        return toResponse(survey);
+
+        Set<ChoiceRef> wanted = new LinkedHashSet<>();
+        List<Choice> toInsert = new ArrayList<>();
+        for (ParsedChoice choice : parsed) {
+            ChoiceRef ref = choice.ref();
+            wanted.add(ref);
+            Choice current = byRef.get(ref);
+            if (current == null) {
+                toInsert.add(choice.toEntity(id));
+            } else {
+                // та же строка, но, возможно, с другим рангом или весом
+                current.setRank(choice.rank());
+                current.setWeight(choice.weight());
+            }
+        }
+
+        List<Choice> toDelete = new ArrayList<>();
+        for (Choice choice : existing) {
+            if (!wanted.contains(refOf(choice))) {
+                toDelete.add(choice);
+            }
+        }
+
+        // вставки и удаления затрагивают разные ключи, поэтому порядок не важен
+        choices.deleteAll(toDelete);
+        choices.saveAll(toInsert);
     }
 
     /** Отмечает участника ответившим. Публичный метод: импорт тоже знает про ответы. */

@@ -60,7 +60,11 @@ class FakeNode {
     }
 
     replaceChildren(...nodes) {
-        this.children = nodes;
+        // Настоящий replaceChildren приводит каждый аргумент к узлу: Node
+        // берётся как есть, всё остальное становится текстом через String().
+        // Именно так null превращается в видимый текст «null». Двой обязан
+        // вести себя так же, иначе этот баг просто не воспроизводится.
+        this.children = nodes.map(n => n instanceof FakeNode ? n : {data: String(n)});
     }
 
     addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); }
@@ -127,7 +131,20 @@ const requests = [];
 async function fakeFetch(url, options) {
     const method = (options && options.method) || 'GET';
     requests.push({url, method, body: options && options.body ? JSON.parse(options.body) : null});
-    const json = payload => ({ok: true, status: 200, json: async () => payload});
+    // Ответ повторяет то, что умеет настоящий Response: и json(), и text().
+    // Раньше здесь был только json(), из-за чего app.js нельзя было проверить
+    // на пустом теле ответа — а очистка экспертов именно такой ответ и даёт.
+    const json = payload => ({
+        ok: true, status: 200,
+        json: async () => payload,
+        text: async () => JSON.stringify(payload)
+    });
+    // 200 без тела: так отвечает DELETE /experts
+    const empty = () => ({
+        ok: true, status: 200,
+        json: async () => { throw new SyntaxError('Unexpected end of JSON input'); },
+        text: async () => ''
+    });
 
     if (url === '/api/surveys' && method === 'GET') return json([surveyDto()]);
     if (/^\/api\/surveys\/\d+$/.test(url) && method === 'GET') return json(surveyDto());
@@ -136,6 +153,8 @@ async function fakeFetch(url, options) {
     if (/\/experts$/.test(url) && method === 'GET') return json([]);
     if (/\/choices$/.test(url) && method === 'POST') return json(surveyDto());
     if (/\/experts$/.test(url) && method === 'POST') return json(surveyDto());
+    if (/\/experts$/.test(url) && method === 'DELETE') return empty();
+    if (/\/choices$/.test(url) && method === 'DELETE') return empty();
     return json({});
 }
 
@@ -252,6 +271,17 @@ const addExpert = (name) => {
         assert.ok('respondent' in post.body,
             'без respondent сервер не отметит ответ, и «отвечал, но никого не выбрал» потеряется');
         assert.equal(post.body.respondent, '1', 'отправлен не тот респондент, который сейчас выбран');
+    });
+
+    await check('полная перезапись помечает запрос как replaceAll', async () => {
+        requests.length = 0;
+        await vm.runInContext('replaceAllChoices()', context);
+        const post = requests.find(r => r.method === 'POST' && /\/choices$/.test(r.url));
+        assert.ok(post, 'полная перезапись выборов не выполнена');
+        assert.strictEqual(post.body.replaceAll, true,
+            'без replaceAll сервер заменит только симпатии, а пришлются оба вида — вторая правка упадёт');
+        assert.ok(!('replace' in post.body) || post.body.replace === false,
+            'replace:true удалит все симпатии перед вставкой и упрётся в уникальный индекс');
     });
 
     await check('себя выбрать нельзя', () => {
@@ -399,6 +429,49 @@ const addExpert = (name) => {
         assert.ok(vm.runInContext('kendallVerdict({experts:[1,2],kendallW:0.93})', context).includes('высокая'));
         assert.ok(vm.runInContext('kendallVerdict({experts:[1,2],kendallW:0.6})', context).includes('средняя'));
         assert.ok(vm.runInContext('kendallVerdict({experts:[1,2],kendallW:0.2})', context).includes('низкая'));
+    });
+
+    // Регрессия: replaceChildren приводит null к тексту, а не пропускает его.
+    // Условные куски «cond ? узел : null» попадали на страницу как текст «null».
+    await check('на странице нет текста «null»', async () => {
+        // setChildren обязан отбрасывать пустые куски, а replaceChildren — нет
+        const node = registry.get('resultContent');
+        vm.runInContext("setChildren(document.querySelector('#resultContent'), "
+            + "document.querySelector('#socLegend'), null, undefined, false)", context);
+        assert.ok(!/^\s*null\s*$/i.test(node.textContent.trim()),
+            'setChildren пропустил пустой кусок: ' + JSON.stringify(node.textContent));
+
+        // и наоборот: «сырой» replaceChildren действительно дописывает «null» —
+        // иначе проверка выше ничего бы не значила
+        node.replaceChildren(registry.get('socLegend'), null);
+        assert.ok(/\bnull\b/.test(node.textContent),
+            'двой DOM перестал воспроизводить поведение replaceChildren — тест выше недействителен');
+    });
+
+    await check('отрисовка вкладок не оставляет «null» в подписях', async () => {
+        for (const fn of ['renderResults', 'renderSociogram', 'renderExperts', 'renderEntry', 'renderMatrix']) {
+            await vm.runInContext(fn + '()', context);
+        }
+        const bad = [];
+        const walk = n => {
+            if (!(n instanceof FakeNode)) return;
+            if (/^\s*null\s*$/i.test(String(n.textContent || '').trim())) bad.push(n.tagName);
+            n.children.forEach(c => walk(c instanceof FakeNode ? c : null));
+        };
+        ['resultContent', 'socLegend', 'expertStats', 'importReport']
+            .forEach(id => walk(registry.get(id)));
+        assert.deepStrictEqual(bad, [], 'текст «null» в: ' + bad.join(', '));
+    });
+
+    // Регрессия: ответ 200 без тела (очистка экспертов) раньше уходил в
+    // response.json() и ронял обработчик на «Unexpected end of JSON input».
+    await check('очистка экспертов не падает на пустом теле ответа', async () => {
+        const before = state().ratings.length;
+        await vm.runInContext('clearExperts()', context);
+        assert.strictEqual(state().ratings.length, 0, 'оценки экспертов не очистились');
+        assert.ok(!/Unexpected end/.test(registry.get('expertsStatus').textContent),
+            'в статусе ошибка разбора ответа: ' + registry.get('expertsStatus').textContent);
+        assert.ok(before >= 0);
     });
 
     console.log(results.join('\n'));

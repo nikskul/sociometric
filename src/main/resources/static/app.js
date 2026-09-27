@@ -38,6 +38,18 @@ function el(tag, attrs, ...children) {
     return node;
 }
 
+/**
+ * Замена содержимого узла без «null» на странице.
+ *
+ * <p>У replaceChildren другой контракт, чем у append: null он превращает в
+ * текстовый узел «null», а не пропускает. Условные куски вида
+ * `cond ? el(...) : null` — как раз такие, поэтому фильтруем их сами.
+ */
+function setChildren(node, ...children) {
+    node.replaceChildren(
+        ...children.flat().filter(child => child !== null && child !== undefined && child !== false));
+}
+
 function status(selector, message, kind) {
     const node = $(selector);
     node.textContent = message || '';
@@ -63,7 +75,11 @@ async function api(url, options) {
         } catch (ignored) { /* тело не JSON */ }
         throw new Error(detail);
     }
-    return response.status === 204 ? null : response.json();
+    // 204 — это пустой ответ, но и 200 без тела бывает: так отвечает очистка
+    // экспертов. Разбирать такой ответ как JSON нельзя — res.json() упадёт
+    // с «Unexpected end of JSON input», поэтому читаем текст и решаем по факту.
+    const text = await response.text();
+    return text ? JSON.parse(text) : null;
 }
 
 const num = (value, digits = 2) =>
@@ -147,11 +163,14 @@ async function persistChoices() {
     await refreshResult();
 }
 
-/** Полная перезапись набора выборов — так надёжнее, чем точечные добавления. */
+/**
+ * Полная перезапись набора выборов — так надёжнее, чем точечные добавления.
+ * replaceAll означает «в choices лежит всё состояние опроса, обоих видов сразу»,
+ * поэтому сервер сверяет его с базой, а не сносит и вставляет заново.
+ */
 async function replaceAllChoices() {
     const body = {
-        kind: 'SYMPATHY',
-        replace: true,
+        replaceAll: true,
         respondent: respondentCode(),
         choices: state.choices.map(c => ({kind: c.kind, from: c.from, to: c.to, rank: c.rank ?? null, weight: c.weight || 1}))
     };
@@ -456,7 +475,7 @@ function renderResults() {
     const matrixCard = renderMatrixView(r);
     const groupsCard = r.groups && r.groups.length ? renderGroups(r.groups) : null;
 
-    host.replaceChildren(
+    setChildren(host,
         el('p', {class: 'hint'},
             `Границы категорий: ${r.autoThresholds ? 'рассчитаны автоматически' : 'заданы вручную'} — `
             + `звезда от ${r.thresholds.star}, предпочитаемый от ${r.thresholds.preferred}, `
@@ -559,7 +578,7 @@ function renderSociogram() {
     const used = [...new Set(state.result.participants
         .filter(p => !(options.hide || '').split(',').includes(p.category))
         .map(p => p.category))];
-    legend.replaceChildren(
+    setChildren(legend,
         ...used.map(name => el('span', {},
             el('i', {class: 'swatch', style: `background:${Soc.COLORS[name] || '#ccd2dc'}`}), title(name))),
         options.arrows !== 'none' ? el('span', {},
@@ -631,7 +650,16 @@ function socPng() {
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
         URL.revokeObjectURL(url);
-        canvas.toBlob(png => download(`sociogram-${state.current.id}.png`, png), 'image/png');
+        canvas.toBlob(png => {
+            // toBlob возвращает null, если холст не помещается в PNG — это
+            // случается на больших группах. Без проверки download() упал бы
+            // с «parameter 1 is not of type 'Blob'» и без всякой подсказки.
+            if (!png) {
+                toast('Не удалось сохранить PNG: картинка слишком большая', true);
+                return;
+            }
+            download(`sociogram-${state.current.id}.png`, png);
+        }, 'image/png');
     };
     image.onerror = () => { URL.revokeObjectURL(url); toast('Не удалось построить PNG', true); };
     image.src = url;
@@ -893,7 +921,7 @@ async function importFile() {
         status('#importStatus',
             `Загружено ${report.imported}, пропущено строк: ${report.skippedRows} · участников в опросе: ${report.participantsCount}`,
             'ok');
-        $('#importReport').replaceChildren(report.warnings && report.warnings.length
+        setChildren($('#importReport'), report.warnings && report.warnings.length
             ? el('div', {class: 'report'}, el('strong', {}, 'Замечания:'),
                 el('ul', {}, ...report.warnings.slice(0, 50).map(w => el('li', {}, w))))
             : null);
@@ -913,12 +941,33 @@ function exportResult(format) {
 
 // ---------------------------------------------------------------- события
 
+/**
+ * Шапка для печати: верхняя панель на бумаге скрыта, а лист без названия
+ * опроса и даты нельзя ни опознать, ни отнести к нужному классу.
+ */
+function renderPrintHeader(tab) {
+    const title = $('#printTitle');
+    const meta = $('#printMeta');
+    if (!title || !meta) return;
+    const current = state.current;
+    title.textContent = current ? current.name : 'Социометрия';
+    const parts = [tab ? tab.textContent.trim() : ''];
+    if (current) {
+        parts.push(current.participants.length + ' участников');
+        parts.push('выборов: ' + current.choicesCount
+            + (current.antipathyCount ? ', антипатий: ' + current.antipathyCount : ''));
+    }
+    parts.push(new Date().toLocaleString('ru-RU'));
+    meta.textContent = parts.filter(Boolean).join(' · ');
+}
+
 function bindEvents() {
     $('#tabs').addEventListener('click', e => {
         const tab = e.target.closest('.tab');
         if (!tab) return;
         $$('.tab').forEach(t => t.classList.toggle('active', t === tab));
         $$('.panel').forEach(p => p.classList.toggle('hidden', p.id !== 'panel-' + tab.dataset.tab));
+        renderPrintHeader(tab);
     });
 
     $('#surveySelect').addEventListener('change', e => selectSurvey(Number(e.target.value)));
@@ -974,7 +1023,10 @@ function bindEvents() {
     $('#matrixKind').addEventListener('change', e => { state.matrixKind = e.target.value; renderMatrix(); });
     $('#btnClearMatrix').addEventListener('click', clearMatrix);
     $('#btnRecalc').addEventListener('click', async () => { await refreshResult(); renderResults(); toast('Пересчитано'); });
-    $('#btnPrint').addEventListener('click', () => window.print());
+    $('#btnPrint').addEventListener('click', () => {
+        renderPrintHeader($('.tab.active'));
+        window.print();
+    });
     $('#btnExportCsv').addEventListener('click', () => exportResult('csv'));
     $('#btnExportXlsx').addEventListener('click', () => exportResult('xlsx'));
     $('#showAnti').addEventListener('change', renderResults);

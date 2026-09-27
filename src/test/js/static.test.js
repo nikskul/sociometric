@@ -134,5 +134,17 @@ check('правила печати скрывают интерфейс, но н�
     assert.ok(print.includes('display: none'), 'нет ни одного display:none при печати');
 });
 
+check('при печати попадает только открытая вкладка', () => {
+    const print = fs.readFileSync(path.join(STATIC, 'styles.css'), 'utf8')
+        .split('@media print')[1] || '';
+    // .panel делается видимой всем подряд, поэтому скрытая вкладка должна
+    // быть явно погашена обратно — иначе на бумагу идут все шесть панелей
+    assert.ok(print.includes('.panel.hidden'),
+        'нет правила .panel.hidden: печать выведет все вкладки сразу');
+    const hidden = print.indexOf('.panel.hidden');
+    const shown = print.indexOf('.panel {');
+    assert.ok(shown < hidden, 'правило .panel.hidden должно идти после .panel, иначе его перебьёт !important');
+});
+
 console.log(results.join('\n'));
 console.log('\n' + passed + ' проверок пройдено');

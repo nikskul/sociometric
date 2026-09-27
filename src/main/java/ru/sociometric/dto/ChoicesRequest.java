@@ -15,12 +15,21 @@ import java.util.List;
  * @param respondent код участника, чей ответ сохраняем. Нужен, чтобы отметить
  *                   «отвечал, но никого не выбрал»: такой ответ не даёт ни одной строки
  *                   выбора, и без отметки он неотличим от не ответившего
+ * @param replaceAll true — в {@code choices} лежит полное желаемое состояние опроса
+ *                    (оба вида выборов сразу), а не только один вид. Именно так
+ *                    сохраняет интерфейс: он держит матрицу целиком в памяти и после
+ *                    правки переписывает её целиком. Значение {@code replace} при этом
+ *                    игнорируется: важно, что запрос полный, а не вид выборов.
+ *                    Без этого флага строки, не попавшие в запрос, остались бы на месте,
+ *                    а пришедшие повторно — упёрлись бы в уникальный индекс
+ *                    {@code (survey_id, respondent, target, kind)}.
  */
 public record ChoicesRequest(
         @NotNull List<@NotNull ChoiceInput> choices,
         boolean replace,
         ChoiceKindInput kind,
-        @Size(max = 64) String respondent) {
+        @Size(max = 64) String respondent,
+        boolean replaceAll) {
 
     public enum ChoiceKindInput {
         SYMPATHY,

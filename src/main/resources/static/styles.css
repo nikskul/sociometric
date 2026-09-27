@@ -240,8 +240,28 @@ dialog textarea { margin: 10px 0; }
     main { padding: 0; max-width: none; }
     .card { box-shadow: none; border: 0; padding: 0 0 12px; page-break-inside: avoid; }
     .panel { display: block !important; }
+    /* печатаем только открытую вкладку: иначе на бумагу попадают все шесть
+       панелей сразу — «Социограмма» превращается в шесть страниц вперемешку
+       с вводом данных и экспертами */
+    .panel.hidden { display: none !important; }
+    /* заголовок печати, которого нет на экране */
+    .print-only { display: block !important; }
     .tile { box-shadow: none; }
     .status-table thead th { position: static; }
     .matrix-wrap { max-height: none; overflow: visible; }
     @page { margin: 14mm; }
+}
+
+/* Блок, который печатается, но не показывается на экране: шапка с названием
+   опроса и датой — на бумаге без неё лист ни с чем не опознать. */
+.print-only { display: none; }
+@media print {
+    .print-only {
+        display: block;
+        margin-bottom: 10mm;
+        padding-bottom: 4mm;
+        border-bottom: 1px solid #ccc;
+    }
+    .print-only .print-title { font-size: 16pt; font-weight: 600; }
+    .print-only .print-meta { font-size: 10pt; color: #444; margin-top: 2mm; }
 }
