@@ -9,6 +9,8 @@
  *
  * Файл самодостаточен: ни одной зависимости от DOM, только сборка строки SVG,
  * поэтому его можно проверять обычными тестами в node (src/test/js).
+ * Для выгрузки (standalone) в строку добавляется блок <style> со стилями
+ * схемы — иначе скачанный SVG открывался бы совсем не тем, что на экране.
  */
 const Soc = (() => {
 
@@ -44,14 +46,38 @@ const Soc = (() => {
     const MARGIN = 34;    // поле вокруг схемы
     const MAX_SIZE = 3000; // предел размера холста
 
+    /*
+     * Оформление схемы, вшитое прямо в SVG.
+     *
+     * На странице эти правила живут в styles.css, но скачанный файл открывают
+     * уже без него. Без блока стилей у стрелок нет `fill: none`, и каждая
+     * открытая дуга `M… Q…` заливалась чёрным — картинка выходила нечитаемой.
+     * Поэтому для выгрузки стили едут вместе с разметкой.
+     *
+     * Здесь только внешний вид. Курсор и наведение мышью при выгрузке не нужны.
+     */
+    const SOC_STYLE = [
+        '.soc-link{fill:none}',
+        '.soc-link.mutual{stroke:#2f6fd0;stroke-width:1.6}',
+        '.soc-link.single{stroke:#a9bddb;stroke-width:1.1}',
+        '.soc-link.anti{stroke:#c0392b;stroke-width:1.1;stroke-dasharray:4 3}',
+        '.soc-node circle{stroke:#33415c;stroke-width:1.2}',
+        '.soc-node text{font-size:11px;fill:#1d2430}',
+        '.soc-ring{fill:none;stroke:#dde3ec;stroke-dasharray:3 4}',
+        '.soc-ring-label{font-size:10px;fill:#9aa3b2}',
+        '.soc-title{font-size:12px;fill:#6b7688}'
+    ].join('');
+
     /**
      * @param result результат из /result
-     * @param options {layout, arrows, hide, antipathy, names}
+     * @param options {layout, arrows, hide, antipathy, names, standalone}
      * @returns {{svg: string, width: number, height: number}}
      */
     function render(result, options) {
-        const opts = Object.assign({layout: 'concentric', arrows: 'all', hide: '', antipathy: false, names: true},
-                options || {});
+        const opts = Object.assign(
+            {layout: 'concentric', arrows: 'all', hide: '', antipathy: false, names: true, standalone: false},
+            options || {});
+        const standalone = Boolean(opts.standalone);
         const hidden = new Set((opts.hide || '').split(',').filter(Boolean));
         // Матрицы выровнены по result.participants, а people — уже отфильтрованный
         // список, поэтому вместе с участником храним его индекс в полной матрице.
@@ -74,6 +100,10 @@ const Soc = (() => {
         const parts = [];
         parts.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" `
             + `width="${width}" height="${height}" font-family="Segoe UI, Arial, sans-serif">`);
+        // Выгрузка несёт стили с собой, на странице они берутся из styles.css.
+        if (standalone) {
+            parts.push(`<style>${SOC_STYLE}</style>`);
+        }
         parts.push(`<defs>
             <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                 <path d="M0,0 L10,5 L0,10 z" fill="#2f6fd0"/>

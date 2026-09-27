@@ -320,4 +320,39 @@ check('все участники одной категории не сливаю
     assertNoOverlap(nodes(svg), 'concentric/одна категория', flat);
 });
 
+check('выгрузка несёт стили внутри SVG, а страница берёт их из styles.css', () => {
+    // Регрессия: скачанный SVG открывают без styles.css, где описаны
+    // .soc-link, .soc-node, .soc-ring. Без них у стрелок не было `fill: none`,
+    // и каждая дуга заливалась чёрным — картинка получалась нечитаемой.
+    const plain = Soc.render(result, options()).svg;
+    const file = Soc.render(result, options({standalone: true})).svg;
+
+    assert.ok(!/<style>/.test(plain),
+        'живая страница получила лишний <style>: на экране стили уже есть в styles.css');
+    assert.ok(/<style>/.test(file), 'в выгруженном SVG нет блока стилей');
+
+    // Без этих правил файл нечитаем: fill:none убирает чёрные пятна на стрелках,
+    // а stroke и обводка возвращают сами линии, кольца и контуры узлов.
+    for (const rule of [
+        '.soc-link{fill:none}',
+        '.soc-link.mutual{stroke:#2f6fd0',
+        '.soc-link.single{stroke:#a9bddb',
+        '.soc-link.anti{stroke:#c0392b',
+        '.soc-node circle{stroke:#33415c',
+        '.soc-node text{font-size:11px',
+        '.soc-ring{fill:none;stroke:#dde3ec'
+    ]) {
+        assert.ok(file.includes(rule), 'в выгруженном SVG нет правила ' + rule);
+    }
+
+    // Внутри <style> нельзя оставлять «<», «>» и «&»: они сломают разбор XML.
+    // Имена свойств вроде stroke и fill внутри правил — обычное дело.
+    const css = file.match(/<style>([^<]*)<\/style>/)[1];
+    assert.ok(!/[<>&]/.test(css),
+        'внутри <style> есть символы, которые сломают разбор XML: ' + css);
+    assert.ok(file.indexOf('<style>') < file.indexOf('<defs>'),
+        'блок стилей должен идти до <defs>, иначе он не применится');
+    assert.ok(file.startsWith('<svg') && file.trim().endsWith('</svg>'), 'SVG не обёрнут');
+});
+
 console.log('\n' + passed + ' проверок пройдено');

@@ -921,7 +921,9 @@ function socSvg() {
         arrows: $('#socArrows').value,
         hide: $('#socHide').value,
         antipathy: $('#socAntipathy').checked,
-        names: $('#socNames').checked
+        names: $('#socNames').checked,
+        // Файл открывают без styles.css, поэтому стили едут внутри SVG.
+        standalone: true
     });
     download(`sociogram-${state.current.id}.svg`, new Blob([svg], {type: 'image/svg+xml;charset=utf-8'}));
 }
@@ -932,7 +934,9 @@ function socPng() {
         arrows: $('#socArrows').value,
         hide: $('#socHide').value,
         antipathy: $('#socAntipathy').checked,
-        names: $('#socNames').checked
+        names: $('#socNames').checked,
+        // Рисуем этот SVG на холсте, а там внешние стили недоступны.
+        standalone: true
     });
     const blob = new Blob([svg], {type: 'image/svg+xml;charset=utf-8'});
     const url = URL.createObjectURL(blob);
