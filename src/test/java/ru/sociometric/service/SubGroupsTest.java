@@ -96,4 +96,25 @@ class SubGroupsTest {
         assertEquals(2, first.indices().n(), "в подгруппе «1» двое участников");
         assertEquals(1, first.indices().mutualPairsCount(), "одна взаимная пара внутри подгруппы");
     }
+
+    @Test
+    @DisplayName("антипатия внутри подгруппы попадает в её индекс отвержения")
+    void subgroupsCountOwnAntipathies() {
+        List<Participant> people = participants("1А", "1Б", "2А", "2Б");
+        // внутри «1» один симпатийный и один антипатийный выбор между теми же людьми
+        SurveyData data = new SurveyData(people, List.of(
+                SurveyData.ChoiceEntry.of(SurveyData.ChoiceType.SYMPATHY, "1А", "1Б"),
+                SurveyData.ChoiceEntry.of(SurveyData.ChoiceType.ANTIPATHY, "1А", "1Б")),
+                2, false, GscFormula.MUTUAL);
+
+        var result = SociometricCalculator.calculate(data, new StatusThresholds(9, 9, 9, 1, false),
+                ResultService.subGroups(people));
+
+        var first = result.groups()[0];
+        assertEquals("1", first.name());
+        assertEquals(0.5, first.indices().rejectedIndex(), 1e-9,
+                "антипатия внутри подгруппы «1» не посчитана: подгруппа выглядит здоровой");
+        assertEquals(0.0, result.groups()[1].indices().rejectedIndex(), 1e-9,
+                "антипатия первой подгруппы не должна попадать во вторую");
+    }
 }

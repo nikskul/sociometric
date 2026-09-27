@@ -48,7 +48,11 @@ const Soc = (() => {
         const opts = Object.assign({layout: 'concentric', arrows: 'all', hide: '', antipathy: false, names: true},
                 options || {});
         const hidden = new Set((opts.hide || '').split(',').filter(Boolean));
-        const people = result.participants.filter(p => !hidden.has(p.category));
+        // Матрицы выровнены по result.participants, а people — уже отфильтрованный
+        // список, поэтому вместе с участником храним его индекс в полной матрице.
+        const people = result.participants
+            .map((p, index) => Object.assign({}, p, {index}))
+            .filter(p => !hidden.has(p.category));
 
         // чем больше группа, тем мельче кружки, иначе схема не влезет на лист
         const base = people.length > 30 ? 10 : people.length > 18 ? 13 : 16;
@@ -242,16 +246,18 @@ const Soc = (() => {
      */
     function sympathyLinks(result, people, positions, maxNode, onlyMutual) {
         const links = [];
-        const n = result.matrix.length;
-        for (let i = 0; i < n; i++) {
-            for (let j = i + 1; j < n; j++) {
-                const forward = result.matrix[i][j] > 0;
-                const back = result.matrix[j][i] > 0;
+        for (let i = 0; i < people.length; i++) {
+            for (let j = i + 1; j < people.length; j++) {
+                // индексы в матрице, а не в отфильтрованном списке
+                const row = people[i].index;
+                const col = people[j].index;
+                const forward = result.matrix[row][col] > 0;
+                const back = result.matrix[col][row] > 0;
                 if (!forward && !back) continue;
                 const mutual = forward && back;
                 if (onlyMutual && !mutual) continue;
-                const a = positions.get(people[i] ? people[i].code : null);
-                const b = positions.get(people[j] ? people[j].code : null);
+                const a = positions.get(people[i].code);
+                const b = positions.get(people[j].code);
                 if (!a || !b) continue;
                 links.push({
                     d: linkPath(a, b, maxNode),
@@ -268,12 +274,11 @@ const Soc = (() => {
 
     function antipathyLinks(result, people, positions, maxNode) {
         const links = [];
-        const n = result.antiMatrix.length;
-        for (let i = 0; i < n; i++) {
-            for (let j = 0; j < n; j++) {
-                if (i === j || result.antiMatrix[i][j] <= 0) continue;
-                const a = positions.get(people[i] ? people[i].code : null);
-                const b = positions.get(people[j] ? people[j].code : null);
+        for (let i = 0; i < people.length; i++) {
+            for (let j = 0; j < people.length; j++) {
+                if (i === j || result.antiMatrix[people[i].index][people[j].index] <= 0) continue;
+                const a = positions.get(people[i].code);
+                const b = positions.get(people[j].code);
                 if (!a || !b) continue;
                 links.push({d: linkPath(a, b, maxNode), kind: 'anti', marker: 'arrow-anti', from: people[i].code, to: people[j].code});
             }

@@ -775,11 +775,6 @@ async function addExpert() {
     return addExpertByName(prompt('Имя эксперта:'));
 }
 
-/** Точка входа для тестов: добавляет эксперта без диалога браузера. */
-function addExpertForTest(name) {
-    return addExpertByName(name);
-}
-
 async function clearExperts() {
     if (!confirm('Удалить все экспертные оценки?')) return;
     state.current = await api(`/api/surveys/${state.current.id}/experts`, {method: 'DELETE'});

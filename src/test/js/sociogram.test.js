@@ -172,6 +172,50 @@ check('скрытие категорий убирает участников и 
     }
 });
 
+check('скрытие в середине матрицы не сдвигает связи на чужих участников', () => {
+    // Матрицы выровнены по полному списку, people — отфильтрованный. Если брать
+    // участника по позиции в отфильтрованном списке, связи уезжают на соседей.
+    const hidden = ['PREFERRED'];
+    const {svg} = Soc.render(result, options({hide: hidden.join(',')}));
+
+    const shown = result.participants.filter(p => !hidden.includes(p.category));
+    const shownCodes = new Set(shown.map(p => p.code));
+    const expected = new Set();
+    for (let i = 0; i < result.participants.length; i++) {
+        for (let j = i + 1; j < result.participants.length; j++) {
+            if (result.matrix[i][j] > 0 || result.matrix[j][i] > 0) {
+                expected.add(result.participants[i].code + '>' + result.participants[j].code);
+            }
+        }
+    }
+
+    const links = [...svg.matchAll(/data-from="([^"]+)" data-to="([^"]+)"/g)]
+        .map(m => m[1] + '>' + m[2]);
+
+    assert.ok(links.length > 0, 'после скрытия не осталось ни одной связи');
+    for (const link of links) {
+        const [from, to] = link.split('>');
+        assert.ok(shownCodes.has(from) && shownCodes.has(to), 'связь со скрытым: ' + link);
+        assert.ok(expected.has(link), 'связи нет в исходной матрице: ' + link);
+    }
+    // связи, не задевающие скрытых, должны сохраниться все
+    const untouched = [...expected].filter(link => link.split('>').every(c => shownCodes.has(c)));
+    for (const link of untouched) {
+        assert.ok(links.includes(link), 'потеряна связь ' + link);
+    }
+});
+
+check('скрытие антипатий не сдвигает стрелки', () => {
+    const withAnti = result.antiMatrix.some((row, i) => row.some((v, j) => v > 0 && i !== j));
+    if (!withAnti) return;
+    const {svg} = Soc.render(result, options({hide: 'STAR', antipathy: true}));
+    const shownCodes = new Set(result.participants.filter(p => p.category !== 'STAR').map(p => p.code));
+    for (const m of svg.matchAll(/class="soc-link anti"[^>]*data-from="([^"]+)" data-to="([^"]+)"/g)) {
+        assert.ok(shownCodes.has(m[1]) && shownCodes.has(m[2]),
+            'антипатия привязана к скрытому участнику: ' + m[1] + '>' + m[2]);
+    }
+});
+
 check('все три раскладки дают одинаковое число узлов', () => {
     for (const layout of ['concentric', 'star', 'circle']) {
         const {svg} = Soc.render(result, options({layout}));

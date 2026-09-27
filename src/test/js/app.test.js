@@ -206,7 +206,11 @@ const app = () => context;
 const state = () => vm.runInContext('state', context);
 const toggle = (from, to, kind) => vm.runInContext(`toggleChoice(${JSON.stringify(from)}, ${JSON.stringify(to)}, ${JSON.stringify(kind || 'SYMPATHY')})`, context);
 const uniqueExperts = () => vm.runInContext('uniqueExperts()', context);
-const addExpert = (name) => vm.runInContext(`addExpertForTest(${JSON.stringify(name)})`, context);
+// добавляем эксперта ровно тем же путём, что и пользователь: через prompt
+const addExpert = (name) => {
+    context.prompt = () => name;
+    return vm.runInContext('addExpert()', context);
+};
 
 (async () => {
     // запускаем приложение так же, как это делает браузер
@@ -306,8 +310,8 @@ const addExpert = (name) => vm.runInContext(`addExpertForTest(${JSON.stringify(n
         // правим одну ячейку нового эксперта
         vm.runInContext("setRating('Психолог', '1', '8')", context);
         const draft = state().expertDraft;
-        assert.ok(draft.has('Психолог 1'), 'черновик не записан');
-        assert.strictEqual(draft.get('Психолог 1'), '8');
+        assert.ok(draft.has('Психолог\u00001'), 'черновик не записан');
+        assert.strictEqual(draft.get('Психолог\u00001'), '8');
     });
 
     await check('сохранение экспертов не затирает оценки других экспертов', async () => {
@@ -330,7 +334,7 @@ const addExpert = (name) => vm.runInContext(`addExpertForTest(${JSON.stringify(n
         s.draftExperts = new Set();
         addExpert('Классный руководитель');
         vm.runInContext("setRating('Классный руководитель', '3', '4')", context);
-        assert.ok(state().expertDraft.has('Классный руководитель 3'),
+        assert.ok(state().expertDraft.has('Классный руководитель\u00003'),
             'ключ черновика разъехался: ' + Array.from(state().expertDraft.keys()).join('|'));
     });
 

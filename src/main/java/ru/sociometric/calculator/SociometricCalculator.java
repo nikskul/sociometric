@@ -178,7 +178,7 @@ public final class SociometricCalculator {
         List<SociometricResult.GroupIndex> groupIndices = new ArrayList<>();
         for (SubGroup sub : subgroups) {
             if (sub.indices().size() >= 2) {
-                groupIndices.add(computeSubGroup(sub, matrix, formula));
+                groupIndices.add(computeSubGroup(sub, matrix, antiMatrix, formula));
             }
         }
 
@@ -270,7 +270,8 @@ public final class SociometricCalculator {
                 distribution);
     }
 
-    private static SociometricResult.GroupIndex computeSubGroup(SubGroup sub, int[][] matrix, GscFormula formula) {
+    private static SociometricResult.GroupIndex computeSubGroup(SubGroup sub, int[][] matrix,
+                                                                int[][] antiMatrix, GscFormula formula) {
         int m = sub.indices().size();
         int[][] subMatrix = new int[m][m];
         for (int a = 0; a < m; a++) {
@@ -279,6 +280,16 @@ public final class SociometricCalculator {
             }
         }
         int[] incoming = new int[m];
+        // Антипатии внутри подгруппы: без них индекс отвержения подгруппы был бы нулевым
+        // и подгруппа с отвержением выглядела бы здоровой.
+        int[] subAntipathyIncoming = new int[m];
+        for (int a = 0; a < m; a++) {
+            for (int b = 0; b < m; b++) {
+                if (a != b && antiMatrix[sub.indices().get(a)][sub.indices().get(b)] > 0) {
+                    subAntipathyIncoming[a]++;
+                }
+            }
+        }
         int unidirectionalCount = 0;
         double mutualWeightSum = 0;
         for (int a = 0; a < m; a++) {
@@ -297,10 +308,10 @@ public final class SociometricCalculator {
             }
         }
         int mutual = countMutualPairs(subMatrix);
-        String[] categories = categoriesRaw(incoming, new int[m], StatusThresholds.defaults());
+        String[] categories = categoriesRaw(incoming, subAntipathyIncoming, StatusThresholds.defaults());
         return new SociometricResult.GroupIndex(sub.name(), m,
                 computeIndices(m, subMatrix, mutual, unidirectionalCount, categories,
-                        new int[m], formula, mutualWeightSum));
+                        subAntipathyIncoming, formula, mutualWeightSum));
     }
 
     private static int countMutualPairs(int[][] matrix) {

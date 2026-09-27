@@ -18,6 +18,9 @@ const STATIC = path.join(__dirname, '..', '..', 'main', 'resources', 'static');
 const html = fs.readFileSync(path.join(STATIC, 'index.html'), 'utf8');
 const appJs = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
 const files = fs.readdirSync(STATIC).filter(f => /\.(js|css|html)$/.test(f));
+// сами тесты тоже должны оставаться текстом: сырой NUL внутри строки
+// невидим в diff и ломает grep, не ломая node
+const ownFiles = fs.readdirSync(__dirname).filter(f => f.endsWith('.js'));
 
 let passed = 0;
 const results = [];
@@ -33,13 +36,19 @@ function check(name, fn) {
 }
 
 check('все файлы читаются как текст, без бинарных байтов', () => {
-    for (const file of files) {
-        const bytes = fs.readFileSync(path.join(STATIC, file));
+    const check1 = (name, bytes) => {
         for (const byte of bytes) {
             assert.ok(byte === 9 || byte === 10 || byte === 13 || byte >= 32,
-                file + ': непечатаемый байт ' + byte);
+                name + ': непечатаемый байт ' + byte);
         }
-    }
+    };
+    for (const file of files) check1(file, fs.readFileSync(path.join(STATIC, file)));
+    for (const file of ownFiles) check1('src/test/js/' + file, fs.readFileSync(path.join(__dirname, file)));
+});
+
+check('в статике нет забытых тестовых точек входа', () => {
+    const leaks = [...appJs.matchAll(/([A-Za-z_$][\w$]*ForTest)/g)].map(m => m[1]);
+    assert.strictEqual(leaks.length, 0, 'в бандле попали тестовые функции: ' + leaks.join(', '));
 });
 
 check('js-файлы разбираются', () => {
