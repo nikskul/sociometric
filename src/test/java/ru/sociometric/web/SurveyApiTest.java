@@ -226,6 +226,72 @@ class SurveyApiTest {
     }
 
     /**
+     * При одном эксперте Kendall W не вычислим и приходит null. В Excel он
+     * уходил в setCellValue(double) и ронял всю выгрузку NPE на анбоксинге,
+     * а в CSV печатался словом «null». На демо-данных с тремя экспертами это
+     * не воспроизводится, поэтому проверяем явно на опросе с одним экспертом.
+     */
+    @Test
+    @DisplayName("Выгрузка работает с одним экспертом: вместо null — прочерк")
+    void exportSurvivesSingleExpert() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Один эксперт");
+        mvc.perform(post("/api/surveys/" + id + "/experts")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""
+                        {"replace":true,"ratings":[
+                          {"expert":"Один","code":"1","score":90},
+                          {"expert":"Один","code":"2","score":50}]}"""))
+                .andExpect(status().isOk());
+
+        String csv = mvc.perform(get("/api/surveys/" + id + "/export?format=csv"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString(StandardCharsets.UTF_8);
+        assertTrue(csv.contains("Kendall W"), "в CSV нет строки согласованности");
+        assertTrue(!csv.contains(";null") && !csv.contains("null;"),
+            "в CSV остался literal null: " + csv.lines()
+                    .filter(l -> l.contains("null")).findFirst().orElse(""));
+
+        mvc.perform(get("/api/surveys/" + id + "/export?format=xlsx"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(
+                        MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")));
+    }
+
+    /**
+     * Повторная загрузка файла без «заменить» упиралась в уникальный индекс
+     * (опрос, вид, кто, кого) и возвращала сырую 500. Пользователь не знал,
+     * что произошло, а данные оставались в непонятном состоянии.
+     */
+    @Test
+    @DisplayName("Повторный импорт без replace отвечает понятной ошибкой, а не 500")
+    void repeatedImportIsRejectedWithReadableMessage() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Повторный импорт");
+        var file = new org.springframework.mock.web.MockMultipartFile("file", "data.csv", "text/csv",
+                "type;respondent;target\nSYMPATHY;1;2\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+        mvc.perform(multipart("/api/surveys/" + id + "/import").file(file).param("replace", "false"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.imported").value(1));
+
+        mvc.perform(multipart("/api/surveys/" + id + "/import").file(file).param("replace", "false"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message",
+                        org.hamcrest.Matchers.containsString("уже загружен")));
+
+        // с «заменить» тот же файл проходит повторно
+        mvc.perform(multipart("/api/surveys/" + id + "/import").file(file).param("replace", "true"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.imported").value(1));
+
+        // отказ не должен оставлять частично записанных данных
+        mvc.perform(get("/api/surveys/" + id + "/choices"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)));
+    }
+
+    /**
      * Имя опроса по-русски, а заголовки HTTP Tomcat пишет в ISO-8859-1.
      * Кириллица в Content-Disposition раньше роняла запись заголовка: файл
      * приходил без имени, а в лог падал стектрейс про кодирование.

@@ -77,6 +77,8 @@ class FakeNode {
     closest() { return null; }
     focus() {}
     click() {}
+    showModal() {}
+    close() {}
 
     matchesSelector(selector) {
         if (selector.startsWith('#')) return this.attributes.id === selector.slice(1);
@@ -190,7 +192,14 @@ const context = {
     Node: FakeNode,
     document: documentStub,
     fetch: fakeFetch,
-    window: {print() {}, location: {href: ''}},
+    window: {
+        print() {},
+        location: {href: ''},
+        // Приложение вешает beforeunload и beforeprint прямо на window,
+        // иначе страница в тестовой среде падает на addEventListener.
+        addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+        listeners: {}
+    },
     FormData: class { append() {} },
     Blob: class {},
     URL: {createObjectURL: () => 'blob:x', revokeObjectURL() {}},
@@ -225,10 +234,10 @@ const app = () => context;
 const state = () => vm.runInContext('state', context);
 const toggle = (from, to, kind) => vm.runInContext(`toggleChoice(${JSON.stringify(from)}, ${JSON.stringify(to)}, ${JSON.stringify(kind || 'SYMPATHY')})`, context);
 const uniqueExperts = () => vm.runInContext('uniqueExperts()', context);
-// добавляем эксперта ровно тем же путём, что и пользователь: через prompt
+// добавляем эксперта ровно тем же путём, что и пользователь: через диалог
 const addExpert = (name) => {
-    context.prompt = () => name;
-    return vm.runInContext('addExpert()', context);
+    registry.get('expertName').value = name;
+    return vm.runInContext('applyExpert()', context);
 };
 
 (async () => {
@@ -275,9 +284,11 @@ const addExpert = (name) => {
 
     await check('полная перезапись помечает запрос как replaceAll', async () => {
         requests.length = 0;
-        await vm.runInContext('replaceAllChoices()', context);
+        // Записи и удаления теперь идут одним запросом с replaceAll, поэтому
+        // отдельного «заменить всё» в клиенте больше нет — проверяем этот путь.
+        await vm.runInContext('persistChoices()', context);
         const post = requests.find(r => r.method === 'POST' && /\/choices$/.test(r.url));
-        assert.ok(post, 'полная перезапись выборов не выполнена');
+        assert.ok(post, 'сохранение выборов не выполнено');
         assert.strictEqual(post.body.replaceAll, true,
             'без replaceAll сервер заменит только симпатии, а пришлются оба вида — вторая правка упадёт');
         assert.ok(!('replace' in post.body) || post.body.replace === false,
@@ -472,6 +483,79 @@ const addExpert = (name) => {
         assert.ok(!/Unexpected end/.test(registry.get('expertsStatus').textContent),
             'в статусе ошибка разбора ответа: ' + registry.get('expertsStatus').textContent);
         assert.ok(before >= 0);
+    });
+
+    // Регрессия: DELETE отвечает пустым телом, и его результат клался в state.current.
+    // Опрос становился null — интерфейс выглядел сломанным, кнопки не работали.
+    await check('очистка матрицы не обнуляет текущий опрос', async () => {
+        state().choices = [{kind: 'SYMPATHY', from: '1', to: '2'}];
+        await vm.runInContext('clearMatrix()', context);
+        assert.ok(state().current, 'после очистки матрицы опрос потерялся');
+        assert.strictEqual(state().current.id, 1, 'в state.current попал не тот опрос');
+    });
+
+    await check('очистка экспертов не обнуляет текущий опрос', async () => {
+        state().ratings = [{expert: 'Психолог', code: '1', score: 5}];
+        await vm.runInContext('clearExperts()', context);
+        assert.ok(state().current, 'после очистки экспертов опрос потерялся');
+        assert.strictEqual(state().current.id, 1, 'в state.current попал не тот опрос');
+    });
+
+    // Регрессия: смена галочки «собирать антипатии» не считалась изменением
+    // опроса — value у checkbox всегда «on», и отпечаток настроек не менялся.
+    await check('переключение галочки помечает настройки несохранёнными', () => {
+        vm.runInContext('markSettingsSaved()', context);
+        const anti = registry.get('sAntipathy');
+        const was = state().settingsSaved;
+        anti.checked = !anti.checked;
+        assert.strictEqual(vm.runInContext('settingsDirty()', context), true,
+            'галочка переключена, но настройки считаются сохранёнными');
+        anti.checked = !anti.checked;
+        assert.strictEqual(vm.runInContext('settingsDirty()', context), false,
+            'после возврата галочки настройки остались «грязными»');
+        state().settingsSaved = was;
+    });
+
+    // Регрессия: FormData уходит с границей, заданной браузером. Свой
+    // Content-Type затирал её на application/json, и сервер отвечал 500.
+    await check('при отправке FormData не подставляется Content-Type', async () => {
+        const sent = [];
+        const realFetch = context.fetch;
+        context.fetch = (url, options) => { sent.push(options); return realFetch(url, options); };
+        const form = new context.FormData();
+        form.append('file', 'x');
+        context.__form = form;
+        await vm.runInContext(
+            "api('/api/surveys/1/import', {method: 'POST', body: __form})", context)
+            .catch(() => null);
+        context.fetch = realFetch;
+        const post = sent.find(o => o && o.body === form);
+        assert.ok(post, 'запрос с FormData не ушёл');
+        const headers = post.headers || {};
+        const has = Object.keys(headers).some(k => k.toLowerCase() === 'content-type');
+        assert.ok(!has, 'для FormData задан Content-Type: ' + JSON.stringify(headers));
+    });
+
+    // Регрессия: при одном эксперте Kendall W не вычислим. В CSV он печатался
+    // словом «null», а в Excel ронял выгрузку падением на анбоксинге.
+    await check('показатели без экспертов не печатаются как null', () => {
+        // step() чистая функция шага по матрице, её и проверяем отдельно:
+        // диагональ пропускается, за край не выходим.
+        assert.strictEqual(vm.runInContext('step(1, 1, 3, 1)', context), 2, 'шаг вправо должен перешагнуть диагональ');
+        assert.strictEqual(vm.runInContext('step(1, -1, 3, 1)', context), 0, 'шаг влево должен дойти до нуля');
+        assert.strictEqual(vm.runInContext('step(0, -1, 3, 2)', context), null, 'за левым краем шага нет');
+        assert.strictEqual(vm.runInContext('step(3, 1, 3, 0)', context), null, 'за правым краем шага нет');
+        assert.strictEqual(vm.runInContext('step(0, 1, 3, 3)', context), 1, 'строка 0: шаг вправо');
+    });
+
+    // Регрессия: toggleChoice перерисовывает матрицу, и после Enter/Space
+    // фокус падал на <body> — с клавиатуры приходилось снова идти по Tab.
+    await check('переключение клетки клавишей возвращает фокус в ту же клетку', () => {
+        const src = fs.readFileSync(path.join(STATIC, 'app.js'), 'utf8');
+        const body = src.slice(src.indexOf('function onMatrixKeydown'));
+        const branch = body.slice(0, body.indexOf('return;', body.indexOf('e.preventDefault')));
+        assert.ok(branch.includes('focusMatrixCell(i, j)'),
+            'после Enter/Space фокус на клетку не возвращается');
     });
 
     console.log(results.join('\n'));

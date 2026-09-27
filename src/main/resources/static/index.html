@@ -17,17 +17,19 @@
         <label for="surveySelect">Опрос</label>
         <select id="surveySelect"></select>
         <button id="btnNewSurvey" class="btn btn-primary">+ Новый</button>
-        <button id="btnDeleteSurvey" class="btn btn-ghost" title="Удалить опрос">Удалить</button>
+        <button id="btnDeleteSurvey" class="btn btn-ghost" title="Удалить опрос и все его данные">Удалить</button>
+        <button id="btnPrintTop" class="btn btn-ghost no-print" title="Напечатать открытую вкладку">Печать</button>
     </div>
 </header>
 
-<nav class="tabs" id="tabs">
-    <button class="tab active" data-tab="settings">Опрос</button>
-    <button class="tab" data-tab="entry">Ввод данных</button>
-    <button class="tab" data-tab="import">Импорт</button>
-    <button class="tab" data-tab="results">Результаты</button>
-    <button class="tab" data-tab="sociogram">Социограмма</button>
-    <button class="tab" data-tab="experts">Эксперты</button>
+<nav class="tabs" id="tabs" role="tablist" aria-label="Разделы работы с опросом">
+    <button class="tab active" role="tab" aria-selected="true" aria-controls="panel-settings" data-tab="settings">Опрос</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-entry" data-tab="entry">Ввод данных</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-import" data-tab="import">Импорт</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-results" data-tab="results">Результаты</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-sociogram" data-tab="sociogram">Социограмма</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-experts" data-tab="experts">Эксперты</button>
+    <button class="tab" role="tab" aria-selected="false" aria-controls="panel-help" data-tab="help">Инструкция</button>
 </nav>
 
 <main id="main">
@@ -38,19 +40,19 @@
     </div>
 
     <!-- ================= ОПРОС ================= -->
-    <section class="panel" id="panel-settings">
+    <section class="panel" role="tabpanel" id="panel-settings">
         <div class="card">
             <h2>Параметры опроса</h2>
             <div class="grid-2">
                 <label>Название
-                    <input id="sName" type="text" placeholder="8А класс, весна 2026">
+                    <input id="sName" type="text" maxlength="120" placeholder="8А класс, весна 2026">
                 </label>
                 <label>Сколько участников можно выбрать
                     <input id="sLimit" type="number" min="1" max="20" value="3">
                 </label>
             </div>
             <label>Описание
-                <textarea id="sDescription" rows="2" placeholder="Условия проведения, дата, кто проводил"></textarea>
+                <textarea id="sDescription" rows="2" maxlength="1000" placeholder="Условия проведения, дата, кто проводил"></textarea>
             </label>
             <div class="checks">
                 <label><input id="sAntipathy" type="checkbox"> Собирать антипатии («с кем бы НЕ хотел»)</label>
@@ -59,15 +61,17 @@
             </div>
             <fieldset id="thresholdsBox">
                 <legend>Границы категорий вручную</legend>
+                <p class="hint">Поля применяются, только когда автоматические границы выключены.
+                    Значения — сколько выборов должен получить участник, чтобы попасть в категорию.</p>
                 <div class="grid-4">
                     <label>Звезда, от
-                        <input id="thStar" type="number" min="0" value="3"></label>
+                        <input id="thStar" type="number" min="0" max="100" value="3"></label>
                     <label>Предпочитаемый, от
-                        <input id="thPreferred" type="number" min="0" value="2"></label>
+                        <input id="thPreferred" type="number" min="0" max="100" value="2"></label>
                     <label>Принятый, от
-                        <input id="thAccepted" type="number" min="0" value="1"></label>
+                        <input id="thAccepted" type="number" min="0" max="100" value="1"></label>
                     <label>Наиболее отвергаемый, от
-                        <input id="thMostRejected" type="number" min="1" value="2"></label>
+                        <input id="thMostRejected" type="number" min="1" max="100" value="2"></label>
                 </div>
             </fieldset>
         </div>
@@ -80,31 +84,41 @@
                     <button id="btnBulkParticipants" class="btn btn-ghost">Массово (по именам)</button>
                 </div>
             </div>
-            <p class="hint">Код участника — это номер в матрице: он же подпись в социограмме. Коды должны быть уникальны.</p>
+            <p class="hint">Код участника — это номер в матрице: он же подпись в социограмме.
+                Коды должны быть уникальны. Переименование кода сохраняет его выборы, но
+                убирает из отчёта оценки экспертов по старому коду.</p>
             <table class="grid" id="participantsTable">
+                <caption class="print-only">Список участников</caption>
                 <thead>
-                <tr><th style="width:60px">№</th><th style="width:140px">Код</th><th>Имя</th><th style="width:60px"></th></tr>
+                <tr><th scope="col" class="row-num" style="width:60px">№</th>
+                    <th scope="col" style="width:140px">Код</th>
+                    <th scope="col">Имя</th>
+                    <th scope="col" class="row-num" style="width:60px"><span class="print-only">Убрать</span></th></tr>
                 </thead>
                 <tbody></tbody>
             </table>
             <div class="card-actions">
                 <button id="btnSaveSurvey" class="btn btn-primary">Сохранить опрос</button>
-                <span id="settingsStatus" class="status"></span>
+                <span id="settingsStatus" class="status" role="status" aria-live="polite"></span>
+                <span id="settingsDirty" class="badge-unsaved hidden" role="status">Есть несохранённые изменения</span>
             </div>
         </div>
     </section>
 
     <!-- ================= ВВОД ДАННЫХ ================= -->
-    <section class="panel hidden" id="panel-entry">
+    <section class="panel hidden" role="tabpanel" id="panel-entry">
         <div class="card">
             <h2>Форма участника</h2>
-            <p class="hint">Отметьте, кого участник выбрал. Отметки сохраняются сразу и ограничиваются лимитом выше.</p>
+            <p class="hint">Отметьте, кого участник выбрал. Отметки сохраняются сами через
+                полсекунды после щелчка — кнопка «Сохранить» здесь не нужна.
+                Лимит относится только к симпатиям и не действует в ранжированном режиме.</p>
             <div class="respondent-nav">
                 <button id="btnPrevResp" class="btn btn-ghost">← Предыдущий</button>
+                <label class="sr-only" for="respondentSelect">Кого заполняем</label>
                 <select id="respondentSelect" class="grow"></select>
                 <button id="btnNextResp" class="btn btn-ghost">Следующий →</button>
             </div>
-            <div id="respondentHead" class="respondent-head"></div>
+            <div id="respondentHead" class="respondent-head" role="status" aria-live="polite"></div>
             <div class="choice-block">
                 <h3>С кем хотел бы быть в группе <span class="counter" id="symCounter"></span></h3>
                 <div id="symChoices" class="chips"></div>
@@ -119,6 +133,7 @@
             <div class="card-head">
                 <h2>Социометрическая матрица</h2>
                 <div class="row-actions">
+                    <label class="sr-only" for="matrixKind">Какие выборы показать</label>
                     <select id="matrixKind" class="inline-select">
                         <option value="SYMPATHY">Симпатии</option>
                         <option value="ANTIPATHY">Антипатии</option>
@@ -127,7 +142,8 @@
                 </div>
             </div>
             <p class="hint">Строка — кто выбирает, столбец — кого выбирают. Щелчок по клетке переключает выбор.
-                Подсвечены взаимные пары.</p>
+                Подсвечены взаимные пары. С клавиатуры: <kbd>Tab</kbd> — войти в таблицу,
+                стрелки — ходить по клеткам, <kbd>Enter</kbd> — переключить выбор.</p>
             <div class="matrix-wrap">
                 <table class="matrix" id="matrixTable"></table>
             </div>
@@ -137,16 +153,18 @@
                 <span><i class="swatch self"></i> диагональ (себя выбрать нельзя)</span>
             </div>
             <div class="card-actions">
-                <span id="entryStatus" class="status"></span>
+                <span id="entryStatus" class="status" role="status" aria-live="polite"></span>
             </div>
         </div>
     </section>
 
     <!-- ================= ИМПОРТ ================= -->
-    <section class="panel hidden" id="panel-import">
+    <section class="panel hidden" role="tabpanel" id="panel-import">
         <div class="card">
             <h2>Загрузка результатов из файла</h2>
-            <p class="hint">Поддерживаются CSV и XLSX в двух форматах.</p>
+            <p class="hint">Поддерживаются CSV и XLSX в двух форматах. Коды участников в файле
+                должны совпадать с кодами на вкладке «Опрос». Скачайте шаблон, чтобы посмотреть
+                на рабочий пример.</p>
             <div class="grid-2">
                 <div>
                     <h3>Длинный формат</h3>
@@ -170,22 +188,28 @@ ANTIPATHY,1,12,1</pre>
             <div class="dropzone" id="dropzone">
                 <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
                 <p><strong>Перетащите файл</strong> или <button class="linklike" id="btnPickFile">выберите на диске</button></p>
-                <p class="hint">Коды участников в файле должны совпадать с кодами на вкладке «Опрос».</p>
+                <p class="hint">CSV, TSV или XLSX, до 5 МБ. Разделитель определяется автоматически
+                    (запятая, точка с запятой или табуляция).</p>
+                <p class="file-name" id="fileName"></p>
             </div>
             <div class="checks">
                 <label><input id="importReplace" type="checkbox"> Заменить все уже загруженные данные</label>
             </div>
+            <p class="hint">Без этой галочки файл добавляется к текущим данным. Если в файле есть
+                уже загруженная пара «кто — кого», импорт будет отклонён — тогда включите
+                «заменить все данные». Оценки экспертов при замене не затрагиваются.</p>
             <div class="card-actions">
                 <button id="btnTemplate" class="btn">Скачать шаблон CSV</button>
                 <button id="btnImport" class="btn btn-primary" disabled>Загрузить</button>
-                <span id="importStatus" class="status"></span>
+                <button id="btnImportCancel" class="btn btn-ghost">Снять файл</button>
+                <span id="importStatus" class="status" role="status" aria-live="polite"></span>
             </div>
             <div id="importReport"></div>
         </div>
     </section>
 
     <!-- ================= РЕЗУЛЬТАТЫ ================= -->
-    <section class="panel hidden" id="panel-results">
+    <section class="panel hidden" role="tabpanel" id="panel-results">
         <div class="card no-print">
             <div class="card-head">
                 <h2 id="resultTitle">Результаты</h2>
@@ -205,7 +229,7 @@ ANTIPATHY,1,12,1</pre>
     </section>
 
     <!-- ================= СОЦИОГРАММА ================= -->
-    <section class="panel hidden" id="panel-sociogram">
+    <section class="panel hidden" role="tabpanel" id="panel-sociogram">
         <div class="card no-print">
             <h2>Социограмма</h2>
             <div class="grid-4">
@@ -239,6 +263,8 @@ ANTIPATHY,1,12,1</pre>
                 <label><input id="socAntipathy" type="checkbox"> Стрелки антипатий (пунктир)</label>
                 <label><input id="socNames" type="checkbox" checked> Подписи участников</label>
             </div>
+            <p class="hint">Наведите курсор на участника, чтобы увидеть только его связи.
+                SVG масштабируется без потери качества, PNG — растровая картинка для вставки в документ.</p>
         </div>
         <div class="card">
             <div id="sociogramWrap" class="sociogram-wrap"></div>
@@ -247,7 +273,7 @@ ANTIPATHY,1,12,1</pre>
     </section>
 
     <!-- ================= ЭКСПЕРТЫ ================= -->
-    <section class="panel hidden" id="panel-experts">
+    <section class="panel hidden" role="tabpanel" id="panel-experts">
         <div class="card">
             <div class="card-head">
                 <h2>Оценки популярности экспертами</h2>
@@ -258,11 +284,12 @@ ANTIPATHY,1,12,1</pre>
                 </div>
             </div>
             <p class="hint">Независимый от социометрии метод оценки. Позволяет проверить согласованность
-                экспертов и сопоставить их оценки с реальным статусом участника.</p>
+                экспертов и сопоставить их оценки с реальным статусом участника. Балл — от 0 до 100;
+                пустая ячейка означает «эксперт не оценивал». Изменения применяются кнопкой «Сохранить».</p>
             <div class="matrix-wrap">
                 <table class="matrix" id="expertsTable"></table>
             </div>
-            <span id="expertsStatus" class="status"></span>
+            <span id="expertsStatus" class="status" role="status" aria-live="polite"></span>
         </div>
         <div class="card" id="expertStatsCard">
             <h2>Согласованность и корреляции</h2>
@@ -270,21 +297,212 @@ ANTIPATHY,1,12,1</pre>
         </div>
     </section>
 
+    <!-- ================= ИНСТРУКЦИЯ ================= -->
+    <section class="panel hidden" role="tabpanel" id="panel-help">
+        <div class="card">
+            <h2>Инструкция по работе</h2>
+            <p class="hint">Коротко: создайте опрос, внесите участников и их выборы, посмотрите отчёт.
+                Остальное — подробности и справочник.</p>
+
+            <h3 id="help-start">Быстрый старт</h3>
+            <ol class="help-steps">
+                <li>Нажмите <strong>«+ Новый»</strong> и дайте опросу название — например, «8А, весна 2026».</li>
+                <li>Вкладка <strong>«Опрос»</strong>: впишите участников. Код — короткий и уникальный
+                    («12А», «7Б»); имя необязательно, но в отчёте читается приятнее.
+                    Много участников проще внести кнопкой «Массово (по именам)».</li>
+                <li>Нажмите <strong>«Сохранить опрос»</strong>. Пока не сохранено, изменения держатся
+                    только в памяти страницы.</li>
+                <li>Вкладка <strong>«Ввод данных»</strong>: для каждого участника отметьте, кого он
+                    выбрал. Отметки сохраняются сами. Можно и в матрице — она подходит, чтобы
+                    видеть картину целиком.</li>
+                <li>Вкладка <strong>«Результаты»</strong> — статусы, группы и показатели.
+                    <strong>«Социограмма»</strong> — схема группы, её можно сохранить в SVG или PNG.</li>
+            </ol>
+
+            <h3 id="help-tabs">Что делает каждая вкладка</h3>
+            <dl class="help-dl">
+                <dt>Опрос</dt>
+                <dd>Название, лимит выбора, сбор антипатий, режим ранжирования, границы категорий
+                    и список участников. Всё это сохраняется только кнопкой «Сохранить опрос».</dd>
+
+                <dt>Ввод данных</dt>
+                <dd>Форма одного участника и матрица — два способа внести одно и то же.
+                    Форма удобна, чтобы отвечать от первого лица; матрица — чтобы видеть все пары сразу.
+                    Лимит выбора действует только на симпатии. В режиме ранжирования порядок
+                    симпатий задаётся порядком нажатия, а лимит не применяется.</dd>
+
+                <dt>Импорт</dt>
+                <dd>Загрузка анкет из CSV или XLSX. Нужен, когда анкеты уже отпечатаны и введены
+                    в таблицу, — не приходится переносить каждую пару руками.
+                    Коды в файле должны совпадать с кодами участников.
+                    Без галочки «заменить все данные» файл добавляется к текущему; с ней — полностью
+                    перезаписывает загруженные выборы и отметки об ответе. Оценки экспертов при
+                    этом остаются нетронутыми.</dd>
+
+                <dt>Результаты</dt>
+                <dd>Социометрические статусы каждого участника, разбиение на группы и подгруппы,
+                    плотность и индексы группы. Пересчитывается само, как только появляются новые
+                    выборы. «Только ответившие» оставляет в таблице тех, чьи отметки об ответе есть.</dd>
+
+                <dt>Социограмма</dt>
+                <dd>Схема группы: круги категорий, стрелки выборов, подписи. Раскладку и набор
+                    стрелок можно менять, отдельные категории скрывать. SVG — вектор, годится
+                    в документ; PNG — картинка фиксированного размера.</dd>
+
+                <dt>Эксперты</dt>
+                <dd>Оценки популярности от нескольких взрослых экспертов независимо от социометрии.
+                    Считаются коэффициент согласованности Kendall W и корреляции оценок с реальным
+                    статусом. Нужен минимум два эксперта, иначе Kendall W не вычислим.</dd>
+            </dl>
+
+            <h3 id="help-statuses">Социометрические статусы</h3>
+            <p>Статус определяется тем, сколько участников выбрали человека, с поправкой на то,
+                сколько выборов он раздал сам.</p>
+            <div class="table-scroll">
+            <table class="status-table">
+                <caption>Категории и что они значат</caption>
+                <thead><tr><th scope="col">Категория</th><th scope="col">Кто сюда попадает</th><th scope="col">На что смотреть</th></tr></thead>
+                <tbody>
+                <tr><td><span class="badge badge-STAR">Звезда</span></td>
+                    <td>Получает больше выборов, чем отдаёт</td>
+                    <td>Опора группы. Если их много — вероятно, вопросник поняли как «выбери
+                        стройных», а не «с кем бы ты пошёл»</td></tr>
+                <tr><td><span class="badge badge-PREFERRED">Предпочитаемый</span></td>
+                    <td>Получает выборов заметно больше, чем раздаёт</td>
+                    <td>Компаньон, которого зовут, но который сам не навязывается</td></tr>
+                <tr><td><span class="badge badge-ACCEPTED">Принятый</span></td>
+                    <td>Получает столько же, сколько отдаёт</td>
+                    <td>Ровные, устойчивые отношения</td></tr>
+                <tr><td><span class="badge badge-ISOLATED">Изолированный</span></td>
+                    <td>Получает мало выборов, отдаёт мало</td>
+                    <td>Одиночка. Бывает и «выбирал всех, но его не выбрали»</td></tr>
+                <tr><td><span class="badge badge-REJECTED">Отвергаемый</span></td>
+                    <td>Отдаёт много, получает мало</td>
+                    <td>Отдаёт выборы в пустоту — стоит посмотреть, не было ли его исключили</td></tr>
+                <tr><td><span class="badge badge-OUTSIDER">Аутсайдер</span></td>
+                    <td>Не получает выборов вовсе</td>
+                    <td>Требует внимания, если участников больше 15 человек</td></tr>
+                <tr><td><span class="badge badge-MOST_REJECTED">Наиболее отвергаемый</span></td>
+                    <td>Получил антипатий не меньше заданного порога</td>
+                    <td>Появляется, только если включён сбор антипатий</td></tr>
+                <tr><td><span class="badge badge-REJECTED_BY_SOME">Отвергаемый</span></td>
+                    <td>Кто-то назвал его нежелательным, но не чаще порога</td>
+                    <td>Признак начинающейся не принятой подгруппы</td></tr>
+                <tr><td><span class="badge badge-LOW_ACCEPTED">Низкопринятый</span></td>
+                    <td>Получил хоть что-то, но меньше порога «принятый»</td>
+                    <td>Стоит посмотреть в социограмме, кто его всё-таки выбирает</td></tr>
+                <tr><td><span class="badge badge-NO_DATA">Нет данных</span></td>
+                    <td>Не отвечал на опрос</td>
+                    <td>Исключается из индексов; включите «Только ответившие», чтобы убрать таких из таблицы</td></tr>
+                </tbody>
+            </table>
+            <p class="hint">Вторая таблица в отчёте — категория по антипатиям: <span class="badge badge-NO_ANTIPATHY">Нет антипатий</span>,
+                <span class="badge badge-REJECTED_BY_SOME">Отвергаемый</span>,
+                <span class="badge badge-MOST_REJECTED">Наиболее отвергаемый</span>,
+                <span class="badge badge-NOT_REJECTED">Не отвергаемый</span>. Последняя означает, что антипатий
+                не набралось, но и порог «наиболее отвергаемый» не достигнут.
+            </div>
+            <p class="hint">Границы по умолчанию считаются от среднего числа выборов с разбросом ± σ.
+                Если они не подходят, снимите галочку «Границы категорий по среднему ± σ»
+                и задайте числа вручную — они появятся на вкладке «Опрос».</p>
+
+            <h3 id="help-indices">Показатели группы</h3>
+            <dl class="help-dl">
+                <dt>Групповой индекс структуры (GSC)</dt>
+                <dd>Доля взаимных пар среди всех возможных. Чем выше, тем сплочённее группа.
+                    У группы из 20–30 человек нормально 0,25–0,45.</dd>
+                <dt>Индекс взаимности</dt>
+                <dd>Сколько связей приходится на взаимные пары. Показывает, насколько выборы
+                    отвечают друг на друга.</dd>
+                <dt>Плотность сети</dt>
+                <dd>Доля существующих связей от всех возможных. Помогает понять, насколько группа
+                    вообще «насыщена» контактами.</dd>
+                <dt>Индекс изолированности и индекс отвержения</dt>
+                <dd>Доля изолированных и доля получивших антипатию. Растут при включённых
+                    антипатиях и при активном отторжении кого-то из участников.</dd>
+                <dt>Средний статус и σ</dt>
+                <dd>Среднее по группе и разброс. У зрелой группы статус равномерный, у тревожной —
+                    кто-то резко выше, кто-то резко ниже.</dd>
+            </dl>
+
+            <h3 id="help-experts">Оценки экспертов</h3>
+            <p>Каждый эксперт ставит балл от 0 до 100 каждому участнику, не видя социометрических
+                выборов. Дальше приложение считает:</p>
+            <ul class="help-ul">
+                <li><strong>Kendall W</strong> — согласованность экспертов между собой:
+                    выше 0,8 — высокая, 0,5–0,8 — средняя, ниже 0,5 — оценки плохо совпадают,
+                    и опрос лучше уточнить;</li>
+                <li><strong>Пирсон r</strong> и <strong>Спирмен ρ</strong> — связь экспертных
+                    оценок с реальным полученным статусом. Показывает, насколько эксперты
+                    угадывают реальное положение человека в группе.</li>
+            </ul>
+            <p class="hint">Пропущенные оценки не портят расчёт: Kendall W считается по тем
+                участникам, которых оценили все эксперты, а в таблице они остаются видны.
+                С одним экспертом Kendall W не вычислим вовсе.</p>
+
+            <h3 id="help-export">Выгрузка и печать</h3>
+            <ul class="help-ul">
+                <li><strong>Экспорт CSV</strong> — открывается в Excel и LibreOffice, разделитель «;».</li>
+                <li><strong>Экспорт Excel</strong> — несколько листов: статусы, матрицы, индексы,
+                    граф, эксперты, подгруппы.</li>
+                <li><strong>Шаблон CSV</strong> на вкладке «Импорт» — рабочий пример формата.</li>
+                <li><strong>Печать</strong> печатает только открытую вкладку, с шапкой — название
+                    опроса, вкладка, число участников и выборов, дата. Социограмму тоже можно
+                    напечатать: откройте её и нажмите «Печать».</li>
+            </ul>
+            <p class="hint">Выгрузка не перезагружает страницу, поэтому несохранённые правки
+                участников и оценок при ней не теряются.</p>
+
+            <h3 id="help-faq">Если что-то пошло не так</h3>
+            <dl class="help-dl">
+                <dt>«У всех участников должен быть код»</dt>
+                <dd>Код не может быть пустым: по нему идёт привязка выборов. Заполните его
+                    у всех строк таблицы участников.</dd>
+                <dt>«Код … повторяется»</dt>
+                <dd>Два участника с одинаковым кодом. Код должен быть уникальным — в отчёте
+                    они слились бы в одного человека.</dd>
+                <dt>Импорт отклонён без объяснения</dt>
+                <dd>Скорее всего, в файле есть пара, которая уже загружена. Включите
+                    «Заменить все уже загруженные данные» и загрузите файл ещё раз.</dd>
+                <dt>В отчёте ноль выборов, хотя я вводил их</dt>
+                <dd>Отметки сохраняются сами, но через полсекунды после щелчка. Если страницу
+                    закрыть раньше, последняя правка не успеет уйти. Дождитесь надписи
+                    «Сохранено» внизу карточки.</dd>
+                <dt>Плашка «Есть несохранённые изменения»</dt>
+                <dd>Изменены настройки опроса или список участников. Нажмите «Сохранить опрос» —
+                    либо закройте вкладку и откажитесь, если правки не нужны.</dd>
+                <dt>Kendall W не считается</dt>
+                <dd>Нужно минимум два эксперта, у которых есть оценки одних и тех же участников.</dd>
+            </dl>
+        </div>
+    </section>
+
 </main>
 
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="alert" aria-live="assertive"></div>
 
 <dialog id="bulkDialog">
-    <form method="dialog">
-        <h3>Массовое добавление участников</h3>
-        <p class="hint">По одному участнику в строке. Код можно указать через двоеточие: <code>12:Анна</code>,
-            иначе кодом станет порядковый номер.</p>
-        <textarea id="bulkText" rows="10" placeholder="Анна&#10;Борис&#10;Вера"></textarea>
-        <div class="card-actions">
-            <button value="cancel" class="btn btn-ghost">Отмена</button>
-            <button id="btnBulkApply" value="apply" class="btn btn-primary">Добавить</button>
-        </div>
-    </form>
+    <h3>Массовое добавление участников</h3>
+    <p class="hint" id="bulkHint">По одному участнику в строке. Код можно указать через двоеточие:
+        <code>12:Анна</code>, иначе кодом станет порядковый номер.</p>
+    <textarea id="bulkText" rows="10" aria-label="Список участников, по одному в строке" placeholder="Анна&#10;Борис&#10;Вера"></textarea>
+    <p class="hint warn" id="bulkProblems"></p>
+    <div class="card-actions">
+        <button value="cancel" class="btn btn-ghost" formmethod="dialog">Отмена</button>
+        <button id="btnBulkApply" class="btn btn-primary">Применить</button>
+    </div>
+</dialog>
+
+<dialog id="expertDialog">
+    <h3>Добавить эксперта</h3>
+    <p class="hint" id="expertKnown">Экспертов пока нет.</p>
+    <label>Имя эксперта
+        <input id="expertName" type="text" maxlength="128" placeholder="Например, психолог школы">
+    </label>
+    <div class="card-actions">
+        <button value="cancel" class="btn btn-ghost" formmethod="dialog">Отмена</button>
+        <button id="btnExpertApply" class="btn btn-primary">Добавить</button>
+    </div>
 </dialog>
 
 <script src="sociogram.js"></script>

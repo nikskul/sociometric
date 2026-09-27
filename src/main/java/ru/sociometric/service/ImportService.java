@@ -90,15 +90,40 @@ public class ImportService {
             parsed = new Parsed(filtered, warnings, parsed.answered());
         }
 
+        // Сначала убираем повторы внутри самого файла, затем сверяемся с уже
+        // загруженными данными. Без replace файл может содержать пару, которая
+        // уже есть: уникальный индекс на (опрос, вид, кто, кого) ронял всю
+        // загрузку с сырой 500, о которой пользователь не знал. Отвечаем 400.
         Set<String> seen = new LinkedHashSet<>();
-        List<Choice> entities = new ArrayList<>(parsed.entries().size());
-        for (SurveyDataEntry entry : parsed.entries()) {
-            if (seen.add(entry.kind() + "|" + entry.from() + "|" + entry.to())) {
-                Choice choice = new Choice(surveyId, entry.from(), entry.to(), entry.kind());
-                choice.setRank(entry.rank());
-                choice.setWeight(entry.weight());
-                entities.add(choice);
+        Set<String> existing = new LinkedHashSet<>();
+        if (!replace) {
+            for (ChoiceKind kind : ChoiceKind.values()) {
+                for (String pair : choices.listPairs(surveyId, kind)) {
+                    int arrow = pair.indexOf('>');
+                    existing.add(kind + "|" + pair.substring(0, arrow) + "|" + pair.substring(arrow + 1));
+                }
             }
+        }
+        List<Choice> entities = new ArrayList<>(parsed.entries().size());
+        List<String> conflicts = new ArrayList<>();
+        for (SurveyDataEntry entry : parsed.entries()) {
+            if (!seen.add(entry.kind() + "|" + entry.from() + "|" + entry.to())) {
+                continue;
+            }
+            if (!replace && existing.contains(entry.kind() + "|" + entry.from() + "|" + entry.to())) {
+                conflicts.add(entry.kind() + " " + entry.from() + "→" + entry.to());
+                continue;
+            }
+            Choice choice = new Choice(surveyId, entry.from(), entry.to(), entry.kind());
+            choice.setRank(entry.rank());
+            choice.setWeight(entry.weight());
+            entities.add(choice);
+        }
+        if (!conflicts.isEmpty()) {
+            List<String> sample = conflicts.subList(0, Math.min(10, conflicts.size()));
+            throw new BadRequestException("В файле " + conflicts.size() + " из выборов уже загружены (например: "
+                    + String.join("; ", sample) + (conflicts.size() > sample.size() ? "…" : "")
+                    + "). Чтобы загрузить файл поверх текущих данных, включите «Заменить все уже загруженные данные».");
         }
         choices.saveAll(entities);
         for (String respondent : parsed.answered()) {

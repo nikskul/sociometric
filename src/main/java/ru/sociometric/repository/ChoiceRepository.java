@@ -21,6 +21,11 @@ public interface ChoiceRepository extends JpaRepository<Choice, Long> {
 
     long countBySurveyIdAndRespondent(Long surveyId, String respondent);
 
+    /** Все пары «кто — кого» конкретного вида, уже сохранённые в опросе. */
+    @Query("select c.respondent || '>' || c.target from Choice c"
+            + " where c.surveyId = :surveyId and c.kind = :kind")
+    List<String> listPairs(Long surveyId, @Param("kind") ChoiceKind kind);
+
     @Modifying
     @Query("delete from Choice c where c.surveyId = :surveyId")
     void deleteBySurveyId(@Param("surveyId") Long surveyId);

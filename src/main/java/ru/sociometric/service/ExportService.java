@@ -117,20 +117,26 @@ public class ExportService {
                         .filter(r -> r.code().equals(score.code())).findFirst().orElse(null);
                 csv.append(cell(score.code())).append(';')
                         .append(cell(score.name())).append(';')
-                        .append(score.mean()).append(';')
-                        .append(score.sd()).append(';')
-                        .append(score.min()).append(';')
-                        .append(score.max()).append(';')
+                        // Среднее и разброс не определены для одного оценки,
+                        // и раньше в CSV попадало слово «null».
+                        .append(number(score.mean())).append(';')
+                        .append(number(score.sd())).append(';')
+                        .append(number(score.min())).append(';')
+                        .append(number(score.max())).append(';')
                         .append(score.votes()).append(';')
                         .append(score.statusReceived()).append(';')
-                        .append(row2 == null ? "" : row2.expertRank()).append(';')
-                        .append(row2 == null ? "" : row2.sociometricRank()).append(';')
-                        .append(row2 == null ? "" : row2.difference()).append('\n');
+                        // При одном эксперте места не ранжируются, и поля ranking
+                        // приходят null — раньше они тоже печатались словом «null».
+                        .append(row2 == null ? "" : number(row2.expertRank())).append(';')
+                        .append(row2 == null ? "" : number(row2.sociometricRank())).append(';')
+                        .append(row2 == null ? "" : number(row2.difference())).append('\n');
             }
             csv.append('\n').append("Kendall W (согласованность экспертов);Пирсон;Спирмен\n");
-            csv.append(result.experts().kendallW()).append(';')
-                    .append(result.experts().pearsonWithStatus()).append(';')
-                    .append(result.experts().spearmanWithStatus()).append('\n');
+            // При менее чем двух экспертах Kendall W не вычислим и приходит null.
+            // StringBuilder печатал это как «null», а в Excel unboxing ронял выгрузку.
+            csv.append(number(result.experts().kendallW())).append(';')
+                    .append(number(result.experts().pearsonWithStatus())).append(';')
+                    .append(number(result.experts().spearmanWithStatus())).append('\n');
         }
 
         for (ResultResponse.GroupDto group : result.groups()) {
@@ -320,25 +326,30 @@ public class ExportService {
             Row row = sheet.createRow(rowIndex++);
             row.createCell(0).setCellValue(score.code());
             row.createCell(1).setCellValue(score.name());
-            row.createCell(2).setCellValue(score.mean());
-            row.createCell(3).setCellValue(score.sd());
-            row.createCell(4).setCellValue(score.min());
-            row.createCell(5).setCellValue(score.max());
+            // Участника, которого не оценил ни один эксперт, в списке нет:
+            // mean и sd приходят null, и setCellValue(double) падал на анбоксинге.
+            writeNumber(row, 2, score.mean());
+            writeNumber(row, 3, score.sd());
+            writeNumber(row, 4, (double) score.min());
+            writeNumber(row, 5, (double) score.max());
             row.createCell(6).setCellValue(score.votes());
             row.createCell(7).setCellValue(score.statusReceived());
             if (ranking != null) {
-                row.createCell(8).setCellValue(ranking.expertRank());
-                row.createCell(9).setCellValue(ranking.sociometricRank());
-                row.createCell(10).setCellValue(ranking.difference());
+                // Те же места, что и в CSV: при одном эксперте они не считаются.
+                writeNumber(row, 8, ranking.expertRank());
+                writeNumber(row, 9, ranking.sociometricRank());
+                writeNumber(row, 10, ranking.difference());
             }
         }
         Row summary = sheet.createRow(rowIndex + 1);
         summary.createCell(0).setCellValue("Kendall W");
-        summary.createCell(1).setCellValue(result.experts().kendallW());
+        // setCellValue(double) выбирается по примитивному типу, и null от
+        // «экспертов меньше двух» падал с NPE на анбоксинге: Excel не выгружался вовсе.
+        writeNumber(summary, 1, result.experts().kendallW());
         summary.createCell(2).setCellValue("Пирсон");
-        summary.createCell(3).setCellValue(result.experts().pearsonWithStatus());
+        writeNumber(summary, 3, result.experts().pearsonWithStatus());
         summary.createCell(4).setCellValue("Спирмен");
-        summary.createCell(5).setCellValue(result.experts().spearmanWithStatus());
+        writeNumber(summary, 5, result.experts().spearmanWithStatus());
         for (int c = 0; c < columns.length; c++) {
             sheet.setColumnWidth(c, 20 * 256);
         }
@@ -394,6 +405,27 @@ public class ExportService {
         }
         String cleaned = value.replace(';', ',').replace('\n', ' ').trim();
         return "\"" + cleaned + "\"";
+    }
+
+    /**
+     * Показатель, который не вычислим (Kendall W при одном эксперте, корреляция
+     * без разброса), в CSV пишется прочерком, а не словом {@code null}.
+     */
+    private static String number(Double value) {
+        return value == null ? "—" : String.valueOf(value);
+    }
+
+    private static String number(int value) {
+        return String.valueOf(value);
+    }
+
+    /** То же для Excel: пустая ячейка лучше, чем падение выгрузки на unboxing. */
+    private static void writeNumber(Row row, int column, Double value) {
+        if (value == null) {
+            row.createCell(column).setCellValue("—");
+        } else {
+            row.createCell(column).setCellValue(value);
+        }
     }
 
     private static CellStyle headerStyle(Workbook workbook) {

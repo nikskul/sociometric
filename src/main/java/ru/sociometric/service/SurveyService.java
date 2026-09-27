@@ -112,8 +112,21 @@ public class SurveyService {
         Set<String> codes = new LinkedHashSet<>();
         participants.forEach(participant -> codes.add(participant.code()));
 
-        // отмечаем ответившим до проверки выборов: «отвечал, но никого не выбрал» —
-        // это тоже ответ, и он не должен превращаться в «не ответил»
+        // Отмечаем ответившим до проверки выборов: «отвечал, но никого не выбрал» —
+        // это тоже ответ, и он не должен превращаться в «не ответил».
+        // respondents — коды тех, чьи строки правили; respondent — одиночный
+        // вариант для одного участника, оставленный для совместимости.
+        if (request.respondents() != null) {
+            for (String code : request.respondents()) {
+                if (code == null || code.isBlank()) {
+                    continue;
+                }
+                if (!codes.contains(code)) {
+                    throw new BadRequestException("Респондент " + code + " не найден среди участников");
+                }
+                markResponded(id, code);
+            }
+        }
         if (request.respondent() != null && !request.respondent().isBlank()) {
             String code = request.respondent();
             if (!codes.contains(code)) {
@@ -141,8 +154,11 @@ public class SurveyService {
             choices.saveAll(entities);
         }
 
-        // без явного respondent отвечавшими считаем всех, кто что-то выбрал
-        if (request.respondent() == null || request.respondent().isBlank()) {
+        // Без явного respondent отвечавшими считаем всех, кто что-то выбрал.
+        // Когда respondents передан, доверяем ему: он точнее, чем «все, кто выбрал».
+        boolean explicitRespondents = request.respondents() != null
+                || (request.respondent() != null && !request.respondent().isBlank());
+        if (!explicitRespondents) {
             parsed.stream().map(ParsedChoice::from).distinct().forEach(code -> markResponded(id, code));
         }
         survey.setUpdatedAt(Instant.now());
@@ -506,6 +522,23 @@ public class SurveyService {
                 responses.deleteByRespondent(surveyId, mark.getRespondent());
                 responses.save(new ResponseMark(surveyId, respondent));
             }
+        }
+
+        // Экспертные оценки ссылаются на код участника, поэтому переименование
+        // обязано затронуть и их. Иначе в отчёте остаются оценки несуществующего
+        // кода, а новый участник выпадает из расчёта согласованности.
+        List<ru.sociometric.domain.ExpertRating> orphaned = new ArrayList<>();
+        for (ru.sociometric.domain.ExpertRating rating : experts.findBySurveyIdOrderByExpertAscIdAsc(surveyId)) {
+            String code = renamed.getOrDefault(rating.getParticipantCode(), rating.getParticipantCode());
+            if (!newCodeSet.contains(code)) {
+                // такого участника в опросе больше нет
+                orphaned.add(rating);
+            } else if (!code.equals(rating.getParticipantCode())) {
+                rating.setParticipantCode(code);
+            }
+        }
+        if (!orphaned.isEmpty()) {
+            experts.deleteAll(orphaned);
         }
     }
 

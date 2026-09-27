@@ -65,13 +65,86 @@ function toast(message, isError) {
     toastTimer = setTimeout(() => node.classList.add('hidden'), 4000);
 }
 
+/**
+ * Пометить кнопку занятой на время запроса.
+ *
+ * <p>Без этого двойной клик по «+ Новый» создавал два одинаковых опроса, а
+ * повторный «Загрузить» — два наложенных импорта. aria-busy нужен, чтобы
+ * о занятости знали и с экрана считывающего.
+ */
+function busy(button, isBusy) {
+    if (!button) return;
+    button.disabled = !!isBusy;
+    if (isBusy) {
+        button.setAttribute('aria-busy', 'true');
+    } else {
+        button.removeAttribute('aria-busy');
+    }
+}
+
+/** Обёртка для обработчиков, которые раньше роняли unhandled rejection. */
+async function guard(button, action) {
+    busy(button, true);
+    try {
+        await action();
+    } catch (e) {
+        toast(e.message || 'Не удалось выполнить действие', true);
+    } finally {
+        busy(button, false);
+    }
+}
+
+/** Предупредить об уходе, пока правки не сохранены. */
+function guardUnsaved(event) {
+    const expertsDirty = state.expertDraft && state.expertDraft.size;
+    if (!settingsDirty() && !expertsDirty) return undefined;
+    event.preventDefault();
+    event.returnValue = '';
+    return '';
+}
+
+/** Плашка «есть несохранённые изменения» на вкладке «Опрос». */
+function updateDirtyHint() {
+    const hint = $('#settingsDirty');
+    if (hint) hint.classList.toggle('hidden', !settingsDirty());
+}
+
+/** Человеческие формулировки вместо технических кодов. */
+const ERROR_TEXT = {
+    400: 'Запрос отклонён — проверьте введённые данные',
+    404: 'Опрос не найден: возможно, он удалён в другой вкладке',
+    409: 'Такие данные уже есть в этом опросе',
+    413: 'Файл слишком большой',
+    415: 'Файл такого формата не поддерживается',
+    500: 'Внутренняя ошибка сервера — попробуйте повторить действие'
+};
+
 async function api(url, options) {
-    const response = await fetch(url, Object.assign({headers: {'Content-Type': 'application/json'}}, options));
+    const opts = Object.assign({}, options);
+    // Заголовок Content-Type ставим только когда сами отправляем JSON. С FormData
+    // его задавать нельзя: браузер сам дописывает boundary, и чужой Content-Type
+    // приводит к 415 — то есть к полностью неработающей загрузке файлов.
+    if (typeof opts.body === 'string') {
+        opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers);
+    }
+    let response;
+    try {
+        response = await fetch(url, opts);
+    } catch (e) {
+        throw new Error('Сервер недоступен. Проверьте, что приложение запущено');
+    }
     if (!response.ok) {
-        let detail = response.status + ' ' + response.statusText;
+        let detail = ERROR_TEXT[response.status]
+            || 'Ошибка ' + response.status + (response.statusText ? ' ' + response.statusText : '');
         try {
             const body = await response.json();
-            if (body && body.message) detail = body.message;
+            // Сообщения о валидации пользователю полезны — показываем. Текст
+            // внутреннего исключения — нет, он уводит в детали реализации.
+            if (body && body.message && response.status < 500) {
+                detail = body.message;
+            } else if (body && body.message) {
+                console.error(response.status, body.message);
+            }
         } catch (ignored) { /* тело не JSON */ }
         throw new Error(detail);
     }
@@ -90,6 +163,11 @@ const pct = value => (value === null || value === undefined) ? '—' : (value * 
 const KEY_SEP = '\u0000';
 const expertKey = (expert, code) => expert + KEY_SEP + code;
 function mutualKey(a, b) { return Math.min(a, b) + '-' + Math.max(a, b); }
+
+/** Имена экспертов произвольны, поэтому в CSS-селектор их надо экранировать. */
+function cssEscape(value) {
+    return String(value).replace(/["\\]/g, '\\$&');
+}
 
 function findChoice(from, to, kind) {
     return state.choices.find(c => c.from === from && c.to === to && c.kind === kind) || null;
@@ -126,6 +204,10 @@ async function loadSurveys(preferredId) {
 }
 
 async function selectSurvey(id) {
+    // Сначала досылаем правки прежнего опроса: иначе отложенное сохранение
+    // сработает уже на новом опросе.
+    await flushChoices();
+    if (state.pendingFile && state.pendingFile.surveyId !== id) state.pendingFile = null;
     state.current = await api('/api/surveys/' + id);
     state.choices = await api(`/api/surveys/${id}/choices`);
     state.ratings = await api(`/api/surveys/${id}/experts`);
@@ -135,12 +217,27 @@ async function selectSurvey(id) {
     state.draftExperts = new Set();
     await refreshResult();
     renderAll();
+    markSettingsSaved();
+    renderSettings();
+    updateDirtyHint();
 }
 
+/**
+ * Пересчитать результаты и обновить всё, что выводится из них.
+ *
+ * <p>Раньше здесь менялся только state.result, а экраны обновляли вызывающие.
+ * В итоге после ввода выборов вкладки «Результаты» и «Социограмма» показывали
+ * прошлые числа, пока пользователь не нажмёт «Пересчитать», а социограмма —
+ * даже после этого. Таблицу экспертов не трогаем: она перестраивается целиком
+ * и вместе с собой уносит фокус из поля, в котором печатают.
+ */
 async function refreshResult() {
     if (!state.current) { state.result = null; return; }
     state.result = await api(`/api/surveys/${state.current.id}/result`);
     $('#resultTitle').textContent = `Результаты: ${state.result.name}`;
+    renderResults();
+    renderSociogram();
+    renderExpertStats();
 }
 
 function respondentCode() {
@@ -149,33 +246,29 @@ function respondentCode() {
     return me ? me.code : null;
 }
 
-/** Сохранить изменения выборов: удалённое убираем, новое добавляем. */
-async function persistChoices() {
-    const body = {
-        kind: 'SYMPATHY',
-        replace: false,
-        // код респондента нужен, чтобы сервер отметил ответ: «отвечал, но никого
-        // не выбрал» не оставляет ни одной строки выбора и иначе теряется
-        respondent: respondentCode(),
-        choices: state.choices.map(c => ({kind: c.kind, from: c.from, to: c.to, rank: c.rank ?? null, weight: c.weight || 1}))
-    };
-    state.current = await api(`/api/surveys/${state.current.id}/choices`, {method: 'POST', body: JSON.stringify(body)});
-    await refreshResult();
-}
-
 /**
- * Полная перезапись набора выборов — так надёжнее, чем точечные добавления.
- * replaceAll означает «в choices лежит всё состояние опроса, обоих видов сразу»,
- * поэтому сервер сверяет его с базой, а не сносит и вставляет заново.
+ * Отправить накопленные выборы на сервер.
+ *
+ * <p>Идентификатор опроса и сами выборы захватываются здесь же. Раньше отложенное
+ * сохранение через 400 мс читало state.current.id в момент срабатывания, и если
+ * пользователь успевал переключить опрос, выборы одного уезжали в другой.
  */
-async function replaceAllChoices() {
+async function persistChoices() {
+    if (!state.current) return;
+    const id = state.current.id;
     const body = {
         replaceAll: true,
+        // Коды участников, чьи ответы мы правили: сервер отметит их отвечавшими.
+        respondents: Array.from(state.touchedRespondents || []),
         respondent: respondentCode(),
         choices: state.choices.map(c => ({kind: c.kind, from: c.from, to: c.to, rank: c.rank ?? null, weight: c.weight || 1}))
     };
-    state.current = await api(`/api/surveys/${state.current.id}/choices`, {method: 'POST', body: JSON.stringify(body)});
-    state.choices = await api(`/api/surveys/${state.current.id}/choices`);
+    const saved = await api(`/api/surveys/${id}/choices`, {method: 'POST', body: JSON.stringify(body)});
+    // Ответ принимаем, только если открыт всё тот же опрос: иначе он уже чужой.
+    if (state.current && state.current.id === id) {
+        state.current = saved;
+        state.touchedRespondents = new Set();
+    }
     await refreshResult();
 }
 
@@ -198,29 +291,49 @@ function toggleChoice(from, to, kind) {
             ? givenCount(from, 'SYMPATHY') + 1 : null;
         state.choices.push({from, to, kind, rank: nextRank, weight: 1});
     }
+    // Кто реально отвечал — тот, чью строку правили, а не тот, кого сейчас
+    // показывает список: иначе отметка об ответе уезжала на другого человека.
+    if (!state.touchedRespondents) state.touchedRespondents = new Set();
+    state.touchedRespondents.add(from);
     saveChoicesDebounced();
 }
 
 let saveTimer = null;
+let pendingSave = null;
+
+/** Отложенное сохранение: клики по матрице идут пачками, серверу — по одному. */
 function saveChoicesDebounced() {
     renderEntry();
     renderMatrix();
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(async () => {
-        try {
-            await replaceAllChoices();
-            status('#entryStatus', `Сохранено в ${new Date().toLocaleTimeString('ru-RU')}`, 'ok');
-            renderSurveys();
-        } catch (e) {
-            status('#entryStatus', 'Ошибка сохранения: ' + e.message, 'err');
-        }
+    saveTimer = setTimeout(() => {
+        pendingSave = persistChoices()
+            .then(() => {
+                status('#entryStatus', `Сохранено в ${new Date().toLocaleTimeString('ru-RU')}`, 'ok');
+                renderSurveys();
+            })
+            .catch(e => status('#entryStatus', 'Ошибка сохранения: ' + e.message, 'err'));
     }, 400);
 }
 
+/**
+ * Дослать несохранённые выборы перед тем, как уйти со вкладки или сменить опрос.
+ * Возвращает само сохранение, чтобы вызывающий мог дождаться.
+ */
+function flushChoices() {
+    clearTimeout(saveTimer);
+    if (pendingSave) return pendingSave;
+    return Promise.resolve();
+}
+
 async function clearMatrix() {
+    if (!state.current) return;
     const kind = state.matrixKind;
-    if (!confirm(`Удалить все ${kind === 'SYMPATHY' ? 'симпатии' : 'антипатии'}?`)) return;
-    state.current = await api(`/api/surveys/${state.current.id}/choices?kind=${kind}`, {method: 'DELETE'});
+    const count = state.choices.filter(c => c.kind === kind).length;
+    if (!confirm(`Удалить все ${kind === 'SYMPATHY' ? 'симпатии' : 'антипатии'} (${count} шт.)?`)) return;
+    // DELETE отвечает пустым телом, поэтому результат нельзя класть в state.current —
+    // иначе текущий опрос становился null и интерфейс выглядел «сломанным».
+    await api(`/api/surveys/${state.current.id}/choices?kind=${kind}`, {method: 'DELETE'});
     state.choices = await api(`/api/surveys/${state.current.id}/choices`);
     await refreshResult();
     renderEntry();
@@ -262,6 +375,14 @@ function renderSurveys() {
     }
 }
 
+/**
+ * Заполнить поля настроек из опроса.
+ *
+ * <p>Вызывается только при открытии опроса и после сохранения. Действия,
+ * меняющие список участников (добавление, удаление, массовое добавление),
+ * вызывают renderParticipants — раньше они дёргали renderSettings и затирали
+ * несохранённые название, описание, лимит и пороги.
+ */
 function renderSettings() {
     const s = state.current;
     const th = (s && s.thresholds) || {star: 3, preferred: 2, accepted: 1, mostRejected: 2};
@@ -275,27 +396,65 @@ function renderSettings() {
     $('#thPreferred').value = th.preferred;
     $('#thAccepted').value = th.accepted;
     $('#thMostRejected').value = th.mostRejected;
-    $('#thresholdsBox').classList.toggle('hidden', !($('#sAuto').checked));
+    // Ручные границы нужны, когда авто-пороги ВЫКЛЮЧЕНЫ. Раньше условие было
+    // обратным, и поля показывались ровно тогда, когда их применение отменялось.
+    $('#thresholdsBox').classList.toggle('hidden', !!$('#sAuto').checked);
+    $('#sLimit').disabled = !!(s && s.ranks);
+    renderParticipants();
+}
 
+function renderParticipants() {
+    const s = state.current;
     const body = $('#participantsTable tbody');
     const list = s ? s.participants : [];
-    body.replaceChildren(...list.map((p, i) => el('tr', {},
+    setChildren(body, ...list.map((p, i) => el('tr', {},
         el('td', {class: 'row-num'}, String(i + 1)),
         el('td', {}, el('input', {
-            type: 'text', value: p.code, maxlength: 64, 'aria-label': 'Код',
-            onchange: e => { list[i].code = e.target.value.trim(); }
+            type: 'text', value: p.code, maxlength: 64,
+            'aria-label': `Код участника ${i + 1}`,
+            oninput: e => { p.code = e.target.value.trim(); onParticipantsChanged(); }
         })),
         el('td', {}, el('input', {
-            type: 'text', value: p.name || '', maxlength: 255, 'aria-label': 'Имя',
-            oninput: e => { list[i].name = e.target.value; }
+            type: 'text', value: p.name || '', maxlength: 255,
+            'aria-label': `Имя участника ${p.code || i + 1}`,
+            oninput: e => { p.name = e.target.value; onParticipantsChanged(); }
         })),
         el('td', {}, el('button', {
-            class: 'btn btn-small btn-ghost', title: 'Убрать',
-            onclick: () => { list.splice(i, 1); renderSettings(); }
+            type: 'button', class: 'btn btn-small btn-ghost', title: 'Убрать участника',
+            'aria-label': `Убрать участника ${p.code || i + 1}`,
+            onclick: () => {
+                const outgoing = state.choices.filter(c => c.from === p.code || c.to === p.code).length;
+                const incoming = state.choices.filter(c => c.to === p.code).length;
+                const message = outgoing
+                    ? `Убрать участника «${p.code}»? После сохранения опроса исчезнут `
+                        + `${outgoing} выбор${plural(outgoing, 'а', 'ов', 'ов')}, `
+                        + `в том числе ${incoming} входящих. Отменить это будет нельзя.`
+                    : `Убрать участника «${p.code}»?`;
+                if (!confirm(message)) return;
+                list.splice(i, 1);
+                renderParticipants();
+                onParticipantsChanged();
+            }
         }, '✕')))));
     if (!list.length) {
-        body.append(el('tr', {}, el('td', {colspan: 4, class: 'hint'}, 'Участников пока нет. Добавьте их вручную или массово.')));
+        body.append(el('tr', {}, el('td', {colspan: 4},
+            emptyState('Участников пока нет',
+                'Добавьте их по одной кнопкой «+ Участник» или списком через «Массовое добавление».'))));
     }
+}
+
+/** Русское склонение числительных: 1 выбор, 2 выбора, 5 выборов. */
+function plural(n, one, few, many) {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return one;
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20)) return few;
+    return many;
+}
+
+/** Любое касание списка участников помечает настройки несохранёнными. */
+function onParticipantsChanged() {
+    updateDirtyHint();
 }
 
 function renderEntry() {
@@ -314,8 +473,18 @@ function renderEntry() {
         $('#symChoices').replaceChildren();
         $('#antiChoices').replaceChildren();
         $('#antiBlock').classList.add('hidden');
+        // Счётчики тоже чистим: раньше над пустым списком оставалось «2 из 3»
+        // от предыдущего опроса.
+        $('#symCounter').textContent = '';
+        $('#symCounter').classList.remove('over');
+        $('#antiCounter').textContent = '';
+        $('#respondentSelect').replaceChildren();
+        $('#btnPrevResp').disabled = true;
+        $('#btnNextResp').disabled = true;
         return;
     }
+    $('#btnPrevResp').disabled = false;
+    $('#btnNextResp').disabled = false;
     const me = list[state.respondent];
     head.append(el('span', {class: 'name'}, `${me.code}. ${me.name || 'без имени'}`),
         el('span', {class: 'hint'}, `участник №${state.respondent + 1} из ${list.length}`));
@@ -337,34 +506,61 @@ function renderEntry() {
     anti.classList.toggle('hidden', !state.current.collectAntipathy);
 }
 
+/**
+ * Чипы выбора.
+ *
+ * <p>Показываем всех участников, а не только уже выбранных. В режиме порядка
+ * раньше выводились только те, кто уже стоит в списке, — то есть на пустом
+ * опросе не оставалось ни одного чипа и ввод через эту форму был невозможен
+ * (оставалась только матрица, недоступная с клавиатуры). Выбранные идут
+ * первыми по возрастанию места, остальные — следом в порядке участников.
+ */
 function renderChips(selector, me, kind, isAnti) {
     const container = $(selector);
-    const codes = state.current.ranks && !isAnti
-        ? state.choices.filter(c => c.from === me.code && c.kind === kind)
-            .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99)).map(c => c.to)
-        : participants().map(p => p.code);
+    const ranked = state.current.ranks && !isAnti;
+    const picked = new Set(state.choices
+        .filter(c => c.from === me.code && c.kind === kind)
+        .map(c => c.to));
+    const order = participants().map(p => p.code);
+    const codes = ranked
+        ? order.filter(c => picked.has(c)).sort((a, b) => rankOf(me.code, a) - rankOf(me.code, b))
+            .concat(order.filter(c => !picked.has(c)))
+        : order;
     const fragment = document.createDocumentFragment();
-    if (state.current.ranks && !isAnti) {
-        fragment.append(el('span', {class: 'hint'},
-            'Порядок выбора важен — щёлкните по участнику, чтобы поставить его на следующее место.'));
+    if (ranked) {
+        fragment.append(el('p', {class: 'hint'},
+            'Порядок важен: щёлкните по участнику, чтобы поставить его на следующее место, '
+            + 'щё раз — снять. Место можно поменять, сняв выбор и выбрав заново.'));
     }
     codes.forEach(code => {
         const target = byCode(code);
         const choice = findChoice(me.code, code, kind);
         const isMe = code === me.code;
         const rank = choice && choice.rank ? el('span', {class: 'rank'}, `№${choice.rank}`) : null;
-        const chip = el('div', {
+        // Настоящая кнопка, а не div с onclick: иначе выбор нельзя поставить
+        // ни с клавиатуры, ни со скринридером.
+        const chip = el('button', {
+            type: 'button',
             class: 'chip' + (choice ? ' on' : '') + (isAnti && choice ? ' anti' : '') + (isMe ? ' me' : ''),
-            title: isMe ? 'Себя выбрать нельзя' : 'Щелчок — отметить выбор',
+            'aria-pressed': choice ? 'true' : 'false',
+            disabled: isMe,
+            title: isMe ? 'Себя выбрать нельзя'
+                : choice ? (ranked ? 'Щелчок — снять выбор' : 'Щелчок — снять выбор')
+                    : (ranked ? 'Щелчок — поставить на следующее место' : 'Щелчок — отметить выбор'),
             onclick: () => toggleChoice(me.code, code, kind)
         },
             el('span', {class: 'code'}, code),
             el('span', {}, (target && target.name) || '—'),
             rank);
-        if (isAnti && choice) chip.classList.add('anti');
         fragment.append(chip);
     });
     container.replaceChildren(fragment);
+}
+
+/** Место участника в ранжированном списке респондента. */
+function rankOf(from, to) {
+    const choice = findChoice(from, to, 'SYMPATHY');
+    return choice && choice.rank ? choice.rank : 99;
 }
 
 function renderMatrix() {
@@ -381,15 +577,20 @@ function renderMatrix() {
         .map(c => mutualKey(list.findIndex(p => p.code === c.from), list.findIndex(p => p.code === c.to))));
 
     const head = el('tr', {}, el('th', {}, 'Кто → кого'),
-        ...list.map(p => el('th', {title: p.name || ''}, p.code)));
+        ...list.map(p => el('th', {scope: 'col', title: p.name || ''}, p.code)));
     const rows = list.map((from, i) => el('tr', {},
-        el('th', {title: from.name || ''}, `${from.code}. ${from.name || '—'}`),
+        el('th', {scope: 'row', title: from.name || ''}, `${from.code}. ${from.name || '—'}`),
         ...list.map((to, j) => {
             if (i === j) return el('td', {class: 'self', title: 'Себя выбрать нельзя'}, '·');
             const choice = findChoice(from.code, to.code, kind);
             const cell = el('td', {
                 class: 'cell' + (choice ? ' on' : '') + (isAnti ? ' anti' : '')
                     + (!isAnti && choice && mutual.has(mutualKey(i, j)) ? ' mutual' : ''),
+                // Матрица — сотни клеток, поэтому фокус по Tab им всем не даём:
+                // в таблицу можно попасть один раз, а дальше по ней ходят стрелками.
+                tabindex: i === 0 && j === 1 ? '0' : '-1',
+                'data-i': String(i), 'data-j': String(j),
+                'aria-label': `${from.code} → ${to.code}: ${choice ? 'выбрано' : 'не выбрано'}`,
                 title: choice ? 'Щелчок — снять выбор' : 'Щелчок — отметить выбор',
                 onclick: () => toggleChoice(from.code, to.code, kind)
             });
@@ -397,15 +598,98 @@ function renderMatrix() {
             else if (choice) cell.append('✓');
             return cell;
         })));
+    table.setAttribute('role', 'grid');
+    table.setAttribute('aria-label',
+        isAnti ? 'Матрица антипатий' : 'Матрица симпатий');
     table.replaceChildren(el('thead', {}, head), el('tbody', {}, ...rows));
+}
+
+/**
+ * Ход по матрице стрелками и переключение выборки клавишами Enter/Space.
+ * Без этого таблица из сотен клеток недоступна с клавиатуры вовсе.
+ */
+function onMatrixKeydown(e) {
+    const cell = e.target.closest('.cell');
+    if (!cell) return;
+    const i = Number(cell.dataset.i);
+    const j = Number(cell.dataset.j);
+    const last = participants().length - 1;
+    let target = null;
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleChoice(participants()[i].code, participants()[j].code, state.matrixKind);
+        // toggleChoice перерисовывает матрицу целиком, и без восстановления
+        // фокус падал на <body>: с клавиатуры пришлось бы снова идти по Tab.
+        focusMatrixCell(i, j);
+        return;
+    } else if (e.key === 'ArrowRight') target = [i, step(j, 1, last, i)];
+    else if (e.key === 'ArrowLeft') target = [i, step(j, -1, last, i)];
+    else if (e.key === 'ArrowDown') target = [step(i, 1, last, j), j];
+    else if (e.key === 'ArrowUp') target = [step(i, -1, last, j), j];
+    else if (e.key === 'Home') target = [i, step(0, 1, last, i)];
+    else if (e.key === 'End') target = [i, step(last, -1, last, i)];
+    else return;
+    e.preventDefault();
+    if (!target) return;
+    focusMatrixCell(target[0], target[1]);
+}
+
+/**
+ * Соседняя клетка по строке или столбцу.
+ *
+ * <p>Диагональ — это td.self: она не клетка выбора, не получает фокус и не имеет
+ * data-i/data-j. Раньше шаг на неё возвращал null, фокус не двигался, и стрелка
+ * «застревала» у края строки. Поэтому диагональ перешагивается.
+ */
+function step(current, delta, last, fixed) {
+    let next = current + delta;
+    while (next >= 0 && next <= last && next === fixed) {
+        next += delta;
+    }
+    if (next < 0 || next > last) {
+        return null;
+    }
+    return next;
+}
+
+/** Ставит фокус на клетку матрицы, если она есть и доступна. */
+function focusMatrixCell(i, j) {
+    const cell = $('#matrixTable').querySelector(`.cell[data-i="${i}"][data-j="${j}"]`);
+    if (!cell) return;
+    $$('#matrixTable .cell').forEach(c => { c.tabIndex = -1; });
+    cell.tabIndex = 0;
+    cell.focus();
 }
 
 // ---------------------------------------------------------------- результаты
 
+/** Заглушка вместо пустой вкладки: объясняем, что делать дальше. */
+function emptyState(title, text) {
+    return el('div', {class: 'empty'},
+        el('p', {class: 'empty-title'}, title),
+        el('p', {class: 'hint'}, text));
+}
+
 function renderResults() {
     const host = $('#resultContent');
     const r = state.result;
-    if (!r || !state.current) { host.replaceChildren(); return; }
+    if (!r || !state.current) {
+        host.replaceChildren(emptyState('Нет открытого опроса',
+            'Создайте опрос на вкладке «Опрос» или выберите существующий в списке сверху.'));
+        return;
+    }
+    if (!r.participants.length) {
+        host.replaceChildren(emptyState('В опросе пока нет участников',
+            'Добавьте участников на вкладке «Опрос» — и здесь появятся статусы, '
+            + 'группы и числовые показатели.'));
+        return;
+    }
+    if (!r.indices.totalSelections) {
+        host.replaceChildren(emptyState('Выборов ещё нет',
+            'Внесите ответы на вкладке «Ввод данных» или загрузите файл на вкладке «Импорт». '
+            + 'Отчёт пересчитается сам, как только появятся выборы.'));
+        return;
+    }
     const showAnti = $('#showAnti').checked;
     const onlyResponded = $('#onlyResponded').checked;
     const i = r.indices;
@@ -564,7 +848,19 @@ function renderMatrixView(r) {
 function renderSociogram() {
     const wrap = $('#sociogramWrap');
     const legend = $('#socLegend');
-    if (!state.result) { wrap.replaceChildren(); legend.replaceChildren(); return; }
+    if (!state.result || !state.result.participants.length) {
+        wrap.replaceChildren(emptyState('Нечего рисовать',
+            'Социограмма строится по внесённым выборам. Добавьте участников и их ответы — '
+            + 'граф появится здесь автоматически.'));
+        legend.replaceChildren();
+        return;
+    }
+    if (!state.result.indices.totalSelections) {
+        wrap.replaceChildren(emptyState('Выборов ещё нет',
+            'Внесите ответы на вкладке «Ввод данных» — и социограмма построится сама.'));
+        legend.replaceChildren();
+        return;
+    }
     const options = {
         layout: $('#socLayout').value,
         arrows: $('#socArrows').value,
@@ -672,7 +968,7 @@ function renderExperts() {
     const list = participants();
     if (!list.length) {
         table.replaceChildren(el('caption', {class: 'hint'}, 'Нет участников'));
-        $('#expertStats').replaceChildren();
+        renderExpertStats();
         return;
     }
     const names = uniqueExperts();
@@ -689,18 +985,37 @@ function renderExperts() {
                 return el('td', {}, el('input', {
                     type: 'number', min: 0, max: 100, value: value ?? '', placeholder: '—',
                     style: 'width:64px;text-align:center;border:0;background:transparent',
-                    'aria-label': `${expert}, ${p.code}`,
+                    'aria-label': `Оценка участника ${p.code} от эксперта ${expert}`,
                     oninput: e => setRating(expert, p.code, e.target.value)
                 }));
             });
-            const values = list.map(p => ratingValue(expert, p.code)).filter(v => v !== null);
-            const mean = values.length ? values.reduce((a, b) => a + b, 0) / values.length : null;
-            return el('tr', {}, el('th', {}, expert), ...inputs,
-                el('td', {class: 'num'}, mean === null ? '—' : num(mean, 1)));
+            return el('tr', {}, el('th', {scope: 'row'},
+                el('span', {class: 'expert-name'}, expert),
+                el('button', {
+                    type: 'button', class: 'btn btn-small btn-ghost', title: 'Удалить оценки эксперта',
+                    'aria-label': `Удалить оценки эксперта ${expert}`,
+                    onclick: () => removeExpert(expert).catch(e => status('#expertsStatus', e.message, 'err'))
+                }, '✕')), ...inputs,
+                el('td', {class: 'num', 'data-mean': expert}, expertMean(expert)));
         });
-        table.replaceChildren(el('thead', {}, head), el('tbody', {}, ...rows));
+        table.replaceChildren(
+            el('caption', {class: 'hint'},
+                'Балл популярности от 0 до 100. Пропуск ячейки означает «эксперт не оценивал». '
+                + 'Изменения сохраняются кнопкой ниже.'),
+            el('thead', {}, head), el('tbody', {}, ...rows));
     }
+    renderExpertStats();
+}
 
+/** Средний балл эксперта в виде текста для правого столбца. */
+function expertMean(expert) {
+    const values = participants().map(p => ratingValue(expert, p.code)).filter(v => v !== null);
+    return values.length ? num(values.reduce((a, b) => a + b, 0) / values.length, 1) : '—';
+}
+
+/** Коэффициенты согласованности: отдельная функция, чтобы её можно было
+ *  обновлять, не перестраивая таблицу ввода. */
+function renderExpertStats() {
     const stats = state.result && state.result.experts;
     const host = $('#expertStats');
     if (!stats || !stats.experts.length) {
@@ -767,13 +1082,17 @@ function ratingValue(expert, code) {
 
 function setRating(expert, code, raw) {
     if (!state.expertDraft) state.expertDraft = new Map();
-    state.expertDraft.set(expert + '\u0000' + code, raw);
+    state.expertDraft.set(expertKey(expert, code), raw);
     status('#expertsStatus', 'Есть несохранённые изменения');
-    // обновляем только средние в правом столбце
-    renderExperts();
+    // Перестраивать таблицу здесь нельзя: replaceChildren уничтожает узел, в
+    // котором печатают, и фокус уходит на body — ввести можно было бы только
+    // один символ. Поэтому правим ровно одну ячейку со средним.
+    const cell = document.querySelector(`#expertsTable [data-mean="${cssEscape(expert)}"]`);
+    if (cell) cell.textContent = expertMean(expert);
 }
 
 async function saveExperts() {
+    if (!state.current) return;
     // Черновик накладываем поверх сохранённых оценок: иначе правка одной ячейки
     // стёрла бы все остальные оценки того же эксперта.
     const merged = new Map(state.ratings.map(r => [expertKey(r.expert, r.code), r.score]));
@@ -819,12 +1138,55 @@ function addExpertByName(name) {
 }
 
 async function addExpert() {
-    return addExpertByName(prompt('Имя эксперта:'));
+    // Вместо системного prompt: он ничего не подсказывает. Список уже добавленных
+    // имён показываем прямо в поле, иначе приходится угадывать, не занят ли текст.
+    const input = $('#expertName');
+    const known = uniqueExperts();
+    $('#expertKnown').textContent = known.length
+        ? 'Уже добавлены: ' + known.join(', ')
+        : 'Экспертов пока нет.';
+    input.value = '';
+    $('#expertDialog').showModal();
+    input.focus();
+}
+
+/** Добавление эксперта из диалога. */
+function applyExpert() {
+    const input = $('#expertName');
+    const name = input.value;
+    if (!name.trim()) {
+        toast('Введите имя эксперта', true);
+        input.focus();
+        return;
+    }
+    $('#expertDialog').close();
+    if (addExpertByName(name)) {
+        const draft = $('#expertsTable').querySelector('tbody tr:last-child input');
+        if (draft) draft.focus();
+    }
+}
+
+async function removeExpert(expert) {
+    if (!confirm(`Удалить оценки эксперта «${expert}»?`)) return;
+    const left = state.ratings.filter(r => r.expert !== expert)
+        .map(r => ({expert: r.expert, code: r.code, score: r.score}));
+    state.current = await api(`/api/surveys/${state.current.id}/experts`, {
+        method: 'POST',
+        body: JSON.stringify({ratings: left, replace: true})
+    });
+    state.ratings = await api(`/api/surveys/${state.current.id}/experts`);
+    state.expertDraft = null;
+    state.draftExperts = new Set();
+    await refreshResult();
+    renderExperts();
+    renderSurveys();
+    status('#expertsStatus', `Оценки эксперта «${expert}» удалены`, 'ok');
 }
 
 async function clearExperts() {
-    if (!confirm('Удалить все экспертные оценки?')) return;
-    state.current = await api(`/api/surveys/${state.current.id}/experts`, {method: 'DELETE'});
+    if (!state.current) return;
+    if (!confirm('Удалить все экспертные оценки? Это затронет и коэффициент согласованности в отчёте.')) return;
+    await api(`/api/surveys/${state.current.id}/experts`, {method: 'DELETE'});
     state.ratings = [];
     state.expertDraft = null;
     state.draftExperts = new Set();
@@ -862,17 +1224,41 @@ async function saveSurvey() {
     };
     try {
         state.current = await api('/api/surveys/' + state.current.id, {method: 'PUT', body: JSON.stringify(payload)});
-        // коды могли измениться — перечитываем выборы, чтобы почистить осиротевшие
-        const dropped = state.choices.filter(c => !codes.has(c.from) || !codes.has(c.to));
-        if (dropped.length) {
-            state.choices = state.choices.filter(c => !dropped.includes(c));
-            await replaceAllChoices();
-        }
+        // Сервер сам переименовывает коды в выборах (remapChoices). Раньше здесь
+        // сверялись со stale-состоянием и осиротевшие строки отправлялись обратно
+        // через replaceAll — то есть переименование кода молча удаляло все выборы
+        // участника. Теперь просто перечитываем то, что сервер сохранил.
+        state.choices = await api(`/api/surveys/${state.current.id}/choices`);
+        await refreshResult();
+        renderEntry();
+        renderMatrix();
+        renderExperts();
+        markSettingsSaved();
         await loadSurveys(state.current.id);
         status('#settingsStatus', 'Сохранено в ' + new Date().toLocaleTimeString('ru-RU'), 'ok');
     } catch (e) {
         status('#settingsStatus', 'Ошибка: ' + e.message, 'err');
     }
+}
+
+/** Снимок полей опроса в момент последнего сохранения — по нему судим о правках. */
+function settingsFingerprint() {
+    // У checkbox надо брать checked, а не value: value у них всегда «on», поэтому
+    // смена галочки «собирать антипатии» не считалась изменением опроса.
+    return JSON.stringify(['#sName', '#sDescription', '#sLimit', '#thStar', '#thPreferred',
+        '#thAccepted', '#thMostRejected']
+        .map(sel => $(sel) ? $(sel).value : null))
+        + JSON.stringify(['#sAntipathy', '#sRanks', '#sAuto']
+        .map(sel => $(sel) ? $(sel).checked : null))
+        + JSON.stringify(state.current ? state.current.participants : []);
+}
+
+function markSettingsSaved() { state.settingsSaved = settingsFingerprint(); }
+
+function settingsDirty() {
+    if (!state.current) return false;
+    if (state.settingsSaved === undefined) return false;
+    return state.settingsSaved !== settingsFingerprint();
 }
 
 async function newSurvey() {
@@ -901,42 +1287,102 @@ async function deleteSurvey() {
 
 function pickFile(file) {
     if (!file) return;
-    state.pendingFile = file;
+    // Файл с чужого опроса нельзя загружать в текущий молча — это почти всегда
+    // ошибка, а последствия (замена всех данных) необратимы.
+    if (state.current) state.pendingFile = {file, surveyId: state.current.id};
     $('#btnImport').disabled = false;
-    $('#dropzone p').firstChild.textContent = `Файл: ${file.name} (${(file.size / 1024).toFixed(1)} КБ) `;
-    status('#importStatus', 'Готово к загрузке');
+    $('#fileName').textContent = `${file.name} · ${(file.size / 1024).toFixed(1)} КБ`;
+    status('#importStatus', 'Готово к загрузке. Нажмите «Загрузить».');
+}
+
+function clearPickedFile() {
+    state.pendingFile = null;
+    $('#fileInput').value = '';
+    $('#btnImport').disabled = true;
+    $('#fileName').textContent = '';
+    status('#importStatus', '');
 }
 
 async function importFile() {
-    if (!state.pendingFile) return;
-    const form = new FormData();
-    form.append('file', state.pendingFile);
+    const pending = state.pendingFile;
+    if (!pending || !state.current) return;
+    if (pending.surveyId !== state.current.id) {
+        toast('Файл выбран для другого опроса — выберите его заново', true);
+        clearPickedFile();
+        return;
+    }
     const replace = $('#importReplace').checked;
+    if (replace && state.choices.length
+        && !confirm('Будут удалены все загруженные выборы и отметки об ответе, затем загружен файл. '
+            + 'Оценки экспертов останутся на месте. Продолжить?')) {
+        return;
+    }
+    if (state.choices.length && !replace
+        && !confirm('Загрузить файл поверх текущих данных? Если в файле есть уже загруженные пары, импорт будет отклонён — тогда отметьте «заменить все данные».')) {
+        return;
+    }
+    const form = new FormData();
+    form.append('file', pending.file);
+    // Пока идёт запрос, кнопка недоступна: повторный клик запускал второй
+    // импорт поверх первого и ронял его на уникальном индексе.
+    busy($('#btnImport'), true);
     try {
         const report = await api(`/api/surveys/${state.current.id}/import?replace=${replace}`, {method: 'POST', body: form});
         state.choices = await api(`/api/surveys/${state.current.id}/choices`);
         state.ratings = await api(`/api/surveys/${state.current.id}/experts`);
+        state.expertDraft = null;
+        state.draftExperts = new Set();
         await refreshResult();
-        renderEntry(); renderMatrix(); renderResults(); renderExperts(); renderSurveys();
-        status('#importStatus',
-            `Загружено ${report.imported}, пропущено строк: ${report.skippedRows} · участников в опросе: ${report.participantsCount}`,
-            'ok');
+        renderEntry(); renderMatrix(); renderExperts(); renderSurveys();
         setChildren($('#importReport'), report.warnings && report.warnings.length
             ? el('div', {class: 'report'}, el('strong', {}, 'Замечания:'),
                 el('ul', {}, ...report.warnings.slice(0, 50).map(w => el('li', {}, w))))
             : null);
+        clearPickedFile();
+        status('#importStatus',
+            `Загружено ${report.imported}, пропущено строк: ${report.skippedRows} · участников в опросе: ${report.participantsCount}`,
+            'ok');
     } catch (e) {
         status('#importStatus', 'Ошибка: ' + e.message, 'err');
+    } finally {
+        busy($('#btnImport'), false);
+    }
+}
+
+/**
+ * Скачать файл, не перезагружая страницу.
+ *
+ * <p>Раньше выгрузка шла через window.location.href — это полная перезагрузка,
+ * из-за которой терялись несохранённые правки участников и оценок экспертов, а
+ * при ошибке выгрузки пользователь оказывался на голой JSON-странице.
+ */
+async function downloadFile(url, filename) {
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            let detail = ERROR_TEXT[response.status] || 'Не удалось скачать файл';
+            try {
+                const body = await response.json();
+                if (body && body.message) detail = body.message;
+            } catch (ignored) { /* тело не JSON */ }
+            throw new Error(detail);
+        }
+        download(filename, await response.blob());
+    } catch (e) {
+        toast(e.message, true);
     }
 }
 
 function downloadTemplate() {
-    window.location.href = `/api/surveys/${state.current.id}/template.csv`;
+    if (!state.current) return;
+    downloadFile(`/api/surveys/${state.current.id}/template.csv`, 'template.csv');
 }
 
 function exportResult(format) {
     if (!state.current) return;
-    window.location.href = `/api/surveys/${state.current.id}/export?format=${format}`;
+    const name = state.current.name || 'отчёт';
+    downloadFile(`/api/surveys/${state.current.id}/export?format=${format}`,
+        `${name}.${format === 'xlsx' ? 'xlsx' : 'csv'}`);
 }
 
 // ---------------------------------------------------------------- события
@@ -961,85 +1407,200 @@ function renderPrintHeader(tab) {
     meta.textContent = parts.filter(Boolean).join(' · ');
 }
 
+/** Показать вкладку: переключить классы, обновить шапку печати и прокрутку. */
+function showTab(tab) {
+    if (!tab) return;
+    $$('.tab').forEach(t => {
+        const active = t === tab;
+        t.classList.toggle('active', active);
+        t.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    $$('.panel').forEach(p => p.classList.toggle('hidden', p.id !== 'panel-' + tab.dataset.tab));
+    renderPrintHeader(tab);
+    // Новая вкладка начинается сверху: иначе после прокрутки внизу «Ввода
+    // данных» переключение оставляет вас в середине «Результатов».
+    window.scrollTo({top: 0});
+    tab.scrollIntoView({block: 'nearest', inline: 'nearest'});
+}
+
+function switchToTab(name) {
+    showTab($('.tab[data-tab="' + name + '"]'));
+}
+
 function bindEvents() {
-    $('#tabs').addEventListener('click', e => {
+    const tabs = $('#tabs');
+    tabs.addEventListener('click', e => {
         const tab = e.target.closest('.tab');
         if (!tab) return;
-        $$('.tab').forEach(t => t.classList.toggle('active', t === tab));
-        $$('.panel').forEach(p => p.classList.toggle('hidden', p.id !== 'panel-' + tab.dataset.tab));
-        renderPrintHeader(tab);
+        showTab(tab);
+    });
+    // Лента вкладок: стрелки влево/вправо, Home/End — как в настоящей ленте ролей.
+    tabs.addEventListener('keydown', e => {
+        const all = $$('.tab');
+        const i = all.indexOf(document.activeElement);
+        if (i < 0) return;
+        let target = null;
+        if (e.key === 'ArrowRight') target = all[(i + 1) % all.length];
+        else if (e.key === 'ArrowLeft') target = all[(i - 1 + all.length) % all.length];
+        else if (e.key === 'Home') target = all[0];
+        else if (e.key === 'End') target = all[all.length - 1];
+        else return;
+        e.preventDefault();
+        target.focus();
+        showTab(target);
+    });
+    window.addEventListener('beforeunload', guardUnsaved);
+    // Печать по Ctrl+P шла мимо обработчика кнопки, и шапка оставалась пустой.
+    window.addEventListener('beforeprint', () => renderPrintHeader($('.tab.active')));
+    $('#btnPrintTop').addEventListener('click', () => {
+        renderPrintHeader($('.tab.active'));
+        window.print();
     });
 
-    $('#surveySelect').addEventListener('change', e => selectSurvey(Number(e.target.value)));
-    $('#btnNewSurvey').addEventListener('click', newSurvey);
-    $('#btnDeleteSurvey').addEventListener('click', deleteSurvey);
-    $('#btnSaveSurvey').addEventListener('click', saveSurvey);
+    $('#matrixTable').addEventListener('keydown', onMatrixKeydown);
+
+    $('#surveySelect').addEventListener('change', async e => {
+        const id = Number(e.target.value);
+        if (settingsDirty() && !confirm('Настройки опроса изменены, но не сохранены. Переключиться?')) {
+            e.target.value = String(state.current ? state.current.id : '');
+            return;
+        }
+        await flushChoices();
+        try {
+            await selectSurvey(id);
+        } catch (err) {
+            toast('Не удалось открыть опрос: ' + err.message, true);
+        }
+    });
+    $('#btnNewSurvey').addEventListener('click', e => guard(e.currentTarget, async () => {
+        if (settingsDirty() && !confirm('Настройки текущего опроса не сохранены. Создать новый и потерять их?')) return;
+        await newSurvey();
+        switchToTab('settings');
+    }));
+    $('#btnDeleteSurvey').addEventListener('click', e => guard(e.currentTarget, deleteSurvey));
+    $('#btnSaveSurvey').addEventListener('click', e => guard(e.currentTarget, saveSurvey));
     $('#btnAddParticipant').addEventListener('click', () => {
         if (!state.current) return;
         const list = participants();
         let n = list.length + 1;
         while (list.some(p => p.code === String(n))) n++;
         list.push({code: String(n), name: 'Участник ' + n});
-        renderSettings();
+        // Перерисовываем только таблицу участников: полный renderSettings затирал
+        // несохранённые название, описание, лимит и пороги.
+        renderParticipants();
+        onParticipantsChanged();
+        const rows = $('#participantsTable tbody').querySelectorAll('tr');
+        const input = rows[rows.length - 1] && rows[rows.length - 1].querySelector('input');
+        if (input) input.focus();
     });
 
+    // Любое изменение полей настроек помечает их несохранёнными
+    ['#sName', '#sDescription', '#sLimit', '#sAntipathy', '#sRanks', '#sAuto',
+        '#thStar', '#thPreferred', '#thAccepted', '#thMostRejected']
+        .forEach(sel => {
+            const node = $(sel);
+            if (node) node.addEventListener('input', updateDirtyHint);
+            if (node) node.addEventListener('change', updateDirtyHint);
+        });
+
     $('#sAuto').addEventListener('change', () =>
-        $('#thresholdsBox').classList.toggle('hidden', !$('#sAuto').checked));
+        $('#thresholdsBox').classList.toggle('hidden', !!$('#sAuto').checked));
 
     $('#btnBulkParticipants').addEventListener('click', () => {
         $('#bulkText').value = participants().map(p => p.code + ':' + (p.name || '')).join('\n');
+        $('#bulkHint').textContent = state.choices.length
+            ? `Сейчас в списке ${participants().length} участников. Всё, чего нет в списке ниже, `
+                + 'будет удалено вместе со своими выборами.'
+            : 'По одному участнику в строке: «код:имя» либо только код. Если код пропустить, он будет присвоен по порядку.';
         $('#bulkDialog').showModal();
     });
     $('#btnBulkApply').addEventListener('click', () => {
         const lines = $('#bulkText').value.split('\n').map(l => l.trim()).filter(Boolean);
         const list = participants();
         const result = [];
+        const taken = new Set();
+        const problems = [];
         let auto = 1;
         for (const line of lines) {
             const idx = line.indexOf(':');
             const code = (idx > 0 ? line.slice(0, idx) : '').trim();
             const name = idx > 0 ? line.slice(idx + 1).trim() : line;
             let finalCode = code;
-            if (!finalCode) { while (result.some(p => p.code === String(auto))) auto++; finalCode = String(auto); }
+            if (!finalCode) {
+                while (taken.has(String(auto))) auto++;
+                finalCode = String(auto);
+            }
+            if (taken.has(finalCode)) {
+                // Раньше дубликаты молча доезжали до «Сохранить опрос» и падали там
+                problems.push(`код «${finalCode}» повторяется — строка пропущена`);
+                continue;
+            }
+            taken.add(finalCode);
             result.push({code: finalCode, name});
         }
+        if (problems.length) {
+            $('#bulkProblems').textContent = problems.slice(0, 5).join('; ')
+                + (problems.length > 5 ? ` и ещё ${problems.length - 5}` : '');
+        } else {
+            $('#bulkProblems').textContent = '';
+        }
         if (result.length) {
+            const removed = list.length - result.length;
+            const lost = state.choices.filter(c => !taken.has(c.from) || !taken.has(c.to)).length;
+            if (removed > 0 || lost > 0) {
+                const parts = [];
+                if (removed > 0) parts.push(`${removed} участник${plural(removed, '', 'а', 'ов')} исчезнет`);
+                if (lost > 0) parts.push(`${lost} выбор${plural(lost, '', 'а', 'ов')} будет удалено`);
+                if (!confirm(`Список будет заменён: ${parts.join(', ')}. Продолжить?`)) return;
+            }
             result.forEach((p, i) => { list[i] = p; });
             list.length = result.length;
-            renderSettings();
+            renderParticipants();
+            onParticipantsChanged();
         }
         $('#bulkDialog').close();
     });
 
     $('#respondentSelect').addEventListener('change', e => { state.respondent = Number(e.target.value); renderEntry(); });
     $('#btnPrevResp').addEventListener('click', () => {
-        state.respondent = (state.respondent - 1 + participants().length) % Math.max(1, participants().length);
+        const n = participants().length;
+        if (!n) return;
+        state.respondent = (state.respondent - 1 + n) % n;
         renderEntry();
     });
     $('#btnNextResp').addEventListener('click', () => {
-        state.respondent = (state.respondent + 1) % Math.max(1, participants().length);
+        const n = participants().length;
+        if (!n) return;
+        state.respondent = (state.respondent + 1) % n;
         renderEntry();
     });
     $('#matrixKind').addEventListener('change', e => { state.matrixKind = e.target.value; renderMatrix(); });
-    $('#btnClearMatrix').addEventListener('click', clearMatrix);
-    $('#btnRecalc').addEventListener('click', async () => { await refreshResult(); renderResults(); toast('Пересчитано'); });
+    $('#btnClearMatrix').addEventListener('click', e => guard(e.currentTarget, clearMatrix));
+    $('#btnRecalc').addEventListener('click', e => guard(e.currentTarget, async () => {
+        await refreshResult();
+        toast('Пересчитано');
+    }));
     $('#btnPrint').addEventListener('click', () => {
         renderPrintHeader($('.tab.active'));
         window.print();
     });
-    $('#btnExportCsv').addEventListener('click', () => exportResult('csv'));
-    $('#btnExportXlsx').addEventListener('click', () => exportResult('xlsx'));
+    $('#btnExportCsv').addEventListener('click', e => guard(e.currentTarget, () => exportResult('csv')));
+    $('#btnExportXlsx').addEventListener('click', e => guard(e.currentTarget, () => exportResult('xlsx')));
     $('#showAnti').addEventListener('change', renderResults);
     $('#onlyResponded').addEventListener('change', renderResults);
 
     ['socLayout', 'socArrows', 'socHide'].forEach(id => $('#' + id).addEventListener('change', renderSociogram));
     ['socAntipathy', 'socNames'].forEach(id => $('#' + id).addEventListener('change', renderSociogram));
-    $('#btnSocSvg').addEventListener('click', socSvg);
-    $('#btnSocPng').addEventListener('click', socPng);
+    $('#btnSocSvg').addEventListener('click', e => guard(e.currentTarget, async () => socSvg()));
+    $('#btnSocPng').addEventListener('click', e => guard(e.currentTarget, async () => socPng()));
 
     $('#btnAddExpert').addEventListener('click', addExpert);
-    $('#btnSaveExperts').addEventListener('click', () => saveExperts().catch(e => status('#expertsStatus', e.message, 'err')));
-    $('#btnClearExperts').addEventListener('click', () => clearExperts().catch(e => status('#expertsStatus', e.message, 'err')));
+    $('#btnExpertApply').addEventListener('click', applyExpert);
+    $('#expertName').addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); applyExpert(); }
+    });
+    $('#btnSaveExperts').addEventListener('click', e => guard(e.currentTarget, saveExperts));
+    $('#btnClearExperts').addEventListener('click', e => guard(e.currentTarget, clearExperts));
 
     $('#btnPickFile').addEventListener('click', () => $('#fileInput').click());
     $('#fileInput').addEventListener('change', e => pickFile(e.target.files[0]));
@@ -1051,8 +1612,9 @@ function bindEvents() {
         e.preventDefault(); dz.classList.remove('over');
     }));
     dz.addEventListener('drop', e => pickFile(e.dataTransfer.files[0]));
-    $('#btnImport').addEventListener('click', importFile);
-    $('#btnTemplate').addEventListener('click', downloadTemplate);
+    $('#btnImport').addEventListener('click', e => guard(e.currentTarget, importFile));
+    $('#btnTemplate').addEventListener('click', e => guard(e.currentTarget, downloadTemplate));
+    $('#btnImportCancel').addEventListener('click', clearPickedFile);
 }
 
 // ---------------------------------------------------------------- старт

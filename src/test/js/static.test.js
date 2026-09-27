@@ -146,5 +146,53 @@ check('при печати попадает только открытая вкл
     assert.ok(shown < hidden, 'правило .panel.hidden должно идти после .panel, иначе его перебьёт !important');
 });
 
+check('есть вкладка «Инструкция» со своим разделом', () => {
+    assert.ok(/data-tab="help"/.test(html), 'нет вкладки «Инструкция»');
+    assert.ok(/id="panel-help"/.test(html), 'нет раздела panel-help');
+    // вкладка без aria-selected не сообщает скринридеру, какая открыта
+    const tabs = [...html.matchAll(/<button class="tab[^>]*>/g)].map(m => m[0]);
+    assert.strictEqual(tabs.length, 7, 'ожидалось 7 вкладок, найдено ' + tabs.length);
+    assert.ok(tabs.every(t => /role="tab"/.test(t) && /aria-selected=/.test(t) && /aria-controls=/.test(t)),
+        'не у всех вкладок есть role/aria-selected/aria-controls');
+    assert.strictEqual(tabs.filter(t => /aria-selected="true"/.test(t)).length, 1,
+        'активной должна быть ровно одна вкладка');
+});
+
+check('инструкция объясняет путь от нового опроса до отчёта', () => {
+    const help = (html.match(/<section class="panel hidden" role="tabpanel" id="panel-help">[\s\S]*?<\/section>\s*\n<\/main>/) || [''])[0];
+    assert.ok(help.length > 2000, 'раздел инструкции подозрительно короткий');
+    // без объяснения значений отчёт читают, но не понимают
+    for (const term of ['Kendall W', 'Социометрические статусы', 'Экспорт', 'Быстрый старт']) {
+        assert.ok(help.includes(term), 'в инструкции нет раздела про «' + term + '»');
+    }
+});
+
+check('у диалогов есть кнопки отмены и у всех вкладок — панели', () => {
+    for (const [dialog, cancel] of [['bulkDialog', 'value="cancel"'], ['expertDialog', 'value="cancel"']]) {
+        const block = (html.match(new RegExp('<dialog id="' + dialog + '">[\\s\\S]*?</dialog>')) || [''])[0];
+        assert.ok(block.length > 0, 'нет диалога ' + dialog);
+        assert.ok(block.includes(cancel), 'в ' + dialog + ' нет кнопки отмены');
+        assert.ok(block.includes('<h3>'), 'у ' + dialog + ' нет заголовка');
+    }
+    for (const m of html.matchAll(/aria-controls="panel-([a-z]+)"/g)) {
+        assert.ok(html.includes('id="panel-' + m[1] + '"'), 'вкладка ссылается на несуществующую панель ' + m[1]);
+    }
+});
+
+check('интерактивные элементы объявлены, а результаты — область для чтения с экрана', () => {
+    assert.ok(/id="tabs"[^>]*role="tablist"/.test(html), 'навигация вкладок не объявлена как tablist');
+    // статусы должны озвучиваться, иначе сообщение об ошибке не слышно
+    for (const id of ['settingsStatus', 'entryStatus', 'importStatus', 'expertsStatus', 'toast']) {
+        const tag = (html.match(new RegExp('id="' + id + '"[^>]*')) || [''])[0];
+        assert.ok(/aria-live=|role="alert"/.test(tag), id + ' не объявляется программам чтения');
+    }
+    assert.ok(/class="sr-only"/.test(html), 'нет класса .sr-only для подписей к полям');
+    assert.ok(/@media \(prefers-reduced-motion: reduce\)/.test(
+        fs.readFileSync(path.join(STATIC, 'styles.css'), 'utf8')),
+        'нет правила prefers-reduced-motion');
+    assert.ok(/:focus-visible/.test(fs.readFileSync(path.join(STATIC, 'styles.css'), 'utf8')),
+        'нет видимого фокуса :focus-visible');
+});
+
 console.log(results.join('\n'));
 console.log('\n' + passed + ' проверок пройдено');
