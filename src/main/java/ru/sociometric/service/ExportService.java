@@ -75,12 +75,25 @@ public class ExportService {
         appendIndices(csv, result.indices());
 
         csv.append('\n').append("Метрики графа предпочтений\n");
-        csv.append("Средняя длина пути;Диаметр;Радиус;Связных пар;Всего пар\n");
+        csv.append("Средняя длина пути;Диаметр;Радиус;Связных компонент;"
+                + "Пар внутри компонент;Всего пар\n");
         csv.append(result.graph().meanDistance()).append(';')
-                .append(result.graph().diameter()).append(';')
+                .append(result.graph().diameter() == null ? "—" : result.graph().diameter().toString())
+                .append(';')
                 .append(result.graph().radius()).append(';')
+                .append(result.graph().connectedComponents()).append(';')
                 .append(result.graph().connectedPairs()).append(';')
-                .append(result.graph().reachablePairs()).append('\n');
+                .append(result.graph().possiblePairs()).append('\n');
+
+        int[] componentRadii = result.graph().componentRadii();
+        if (componentRadii != null && componentRadii.length > 0) {
+            int[] componentDiameters = result.graph().componentDiameters();
+            csv.append("\nКомпонента;Радиус;Диаметр\n");
+            for (int c = 0; c < componentRadii.length; c++) {
+                csv.append(c + 1).append(';').append(componentRadii[c]).append(';')
+                        .append(componentDiameters[c]).append('\n');
+            }
+        }
 
         csv.append('\n').append("Средний статус (μ);Стандартное отклонение (σ)\n");
         csv.append(result.meanStatus()).append(';').append(result.sdStatus()).append('\n');
@@ -239,9 +252,14 @@ public class ExportService {
         sheet.createRow(rowIndex++).createCell(0).setCellValue("Средняя длина пути");
         sheet.getRow(rowIndex - 1).createCell(1).setCellValue(result.graph().meanDistance());
         sheet.createRow(rowIndex++).createCell(0).setCellValue("Диаметр");
-        sheet.getRow(rowIndex - 1).createCell(1).setCellValue(result.graph().diameter());
+        // у несвязного графа диаметр не определён, поэтому пишем прочерк, а не 0:
+        // ноль читался бы как «все участники попарно близки»
+        sheet.getRow(rowIndex - 1).createCell(1).setCellValue(
+                result.graph().diameter() == null ? "—" : result.graph().diameter().toString());
         sheet.createRow(rowIndex++).createCell(0).setCellValue("Радиус");
         sheet.getRow(rowIndex - 1).createCell(1).setCellValue(result.graph().radius());
+        sheet.createRow(rowIndex++).createCell(0).setCellValue("Связных компонент");
+        sheet.getRow(rowIndex - 1).createCell(1).setCellValue(result.graph().connectedComponents());
         sheet.createRow(rowIndex++).createCell(0).setCellValue("Средний статус (μ)");
         sheet.getRow(rowIndex - 1).createCell(1).setCellValue(result.meanStatus());
         sheet.createRow(rowIndex++).createCell(0).setCellValue("Стандартное отклонение (σ)");

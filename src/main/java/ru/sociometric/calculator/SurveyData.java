@@ -4,6 +4,7 @@ import ru.sociometric.domain.GscFormula;
 import ru.sociometric.domain.Participant;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * Входные данные расчёта: список участников в фиксированном порядке
@@ -14,16 +15,25 @@ import java.util.List;
  * @param choicesLimit  сколько участников разрешено выбрать каждому респонденту
  * @param ranks         true — ранжированный опросник, вес выбора = choicesLimit - rank + 1
  * @param formula       формула коэффициента групповой сплоченности
+ * @param responded     коды участников, отправивших ответ; null — сигнала нет,
+ *                      тогда ответившим считается сделавший хотя бы один выбор
  */
 public record SurveyData(List<Participant> participants,
                          List<ChoiceEntry> choices,
                          int choicesLimit,
                          boolean ranks,
-                         GscFormula formula) {
+                         GscFormula formula,
+                         Set<String> responded) {
+
+    public SurveyData(List<Participant> participants, List<ChoiceEntry> choices, int choicesLimit,
+                      boolean ranks, GscFormula formula) {
+        this(participants, choices, choicesLimit, ranks, formula, null);
+    }
 
     public SurveyData {
         participants = List.copyOf(participants);
         choices = List.copyOf(choices);
+        responded = responded == null ? null : Set.copyOf(responded);
     }
 
     public int size() {

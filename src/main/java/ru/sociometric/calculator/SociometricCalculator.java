@@ -45,6 +45,16 @@ public final class SociometricCalculator {
         int[][] matrix = new int[n][n];
         int[][] antiMatrix = new int[n][n];
         boolean[] responded = new boolean[n];
+        // Без явного сигнала об ответе отвечавшим считаем того, у кого есть хоть
+        // какой-то след в данных: выбрал сам или был выбран. Отметки об ответе нужны
+        // только чтобы отличить «отвечал, но никого не выбрал» от «не отвечал».
+        Set<String> declared = data.responded();
+        for (String code : declared == null ? Set.<String>of() : declared) {
+            Integer index = map.get(code);
+            if (index != null) {
+                responded[index] = true;
+            }
+        }
 
         int choicesLimit = data.choicesLimit();
         for (ChoiceEntry entry : data.choices()) {
@@ -54,6 +64,7 @@ public final class SociometricCalculator {
                 continue;
             }
             responded[from] = true;
+            responded[to] = true;
             int weight = entry.weight();
             if (data.ranks() && entry.rank() != null) {
                 // ранжированный опросник: первый выбор весит больше последнего
@@ -101,14 +112,17 @@ public final class SociometricCalculator {
             }
         }
 
-        // пары перебираем один раз, только по i < j, иначе каждая посчитана бы дважды
+        // пары перебираем один раз, только по i < j, иначе каждая посчитана бы дважды.
+        // Вес в сумму идёт удвоенным, потому что формула берёт упорядоченные пары.
         for (int i = 0; i < n; i++) {
             for (int j = i + 1; j < n; j++) {
                 if (matrix[i][j] > 0 && matrix[j][i] > 0) {
                     mutualPairs.add(new SociometricResult.MutualPair(i, j));
                     mutualCount[i]++;
                     mutualCount[j]++;
-                    mutualWeightSum += (double) matrix[i][j] * matrix[j][i];
+                    // именно ×2: формула суммирует по ВСЕМ упорядоченным парам,
+                    // иначе на невзвешенных данных получилась бы половина MUTUAL
+                    mutualWeightSum += 2d * matrix[i][j] * matrix[j][i];
                 } else if (matrix[i][j] > 0) {
                     unidirectional.add(new SociometricResult.UnidirectionalPair(i, j, matrix[i][j]));
                 } else if (matrix[j][i] > 0) {
@@ -131,9 +145,10 @@ public final class SociometricCalculator {
         // --- категории статуса -------------------------------------------------
         double meanStatus = mean(incoming);
         double sdStatus = stdDev(incoming, meanStatus);
-        int[] limits = effectiveThresholds(thresholds, meanStatus, sdStatus);
-        StatusThresholds effective = new StatusThresholds(limits[0], limits[1], limits[2], limits[3], thresholds.auto());
-        String[] categories = categoriesRaw(incoming, selectionsMade, effective);
+        Limits limits = effectiveThresholds(thresholds, meanStatus, sdStatus);
+        StatusThresholds effective = new StatusThresholds(limits.star(), limits.preferred(),
+                limits.accepted(), limits.mostRejected(), thresholds.auto());
+        String[] categories = categoriesRaw(incoming, antipathyIncoming, selectionsMade, responded, effective);
         String[] antipathyCategories = antipathyCategories(antipathyIncoming, effective.mostRejected());
 
         // --- индексы -----------------------------------------------------------
@@ -142,10 +157,10 @@ public final class SociometricCalculator {
                 categories, antipathyIncoming, formula, mutualWeightSum);
 
         // --- граф предпочтений -------------------------------------------------
-        boolean[][] graph = graphOf(matrix, antiMatrix);
+        boolean[][] graph = graphOf(matrix);
         int[] degree = degrees(graph);
         int[][] distances = bfsDistances(graph);
-        int[] diameterRadius = diameterAndRadius(distances);
+        GraphMetrics graphMetrics = diameterAndRadius(distances, components(graph));
         long distanceSum = 0;
         int orderedReachable = 0;
         for (int i = 0; i < n; i++) {
@@ -157,7 +172,7 @@ public final class SociometricCalculator {
             }
         }
         double meanDistance = orderedReachable == 0 ? 0 : (double) distanceSum / orderedReachable;
-        int reachablePairs = orderedReachable / 2;
+        int connectedPairs = orderedReachable / 2;   // пары, между которыми вообще есть путь
 
         // --- сводка по категориям ---------------------------------------------
         List<String> stars = new ArrayList<>();
@@ -169,6 +184,7 @@ public final class SociometricCalculator {
             if (category == StatusCategory.STAR) {
                 stars.add(participants.get(i).code());
             }
+            // NO_DATA в список изолированных не идёт: отсутствие данных — не изоляция
             if (category == StatusCategory.OUTSIDER || category == StatusCategory.ISOLATED) {
                 isolates.add(participants.get(i).code());
             }
@@ -178,7 +194,7 @@ public final class SociometricCalculator {
         List<SociometricResult.GroupIndex> groupIndices = new ArrayList<>();
         for (SubGroup sub : subgroups) {
             if (sub.indices().size() >= 2) {
-                groupIndices.add(computeSubGroup(sub, matrix, antiMatrix, formula));
+                groupIndices.add(computeSubGroup(sub, matrix, antiMatrix, formula, thresholds));
             }
         }
 
@@ -195,8 +211,10 @@ public final class SociometricCalculator {
                 indices,
                 groupIndices.toArray(new SociometricResult.GroupIndex[0]),
                 degree, degree, distances, round4(meanDistance),
-                diameterRadius[0], diameterRadius[1],
-                reachablePairs, n * (n - 1) / 2,
+                graphMetrics.diameter(), graphMetrics.radius(),
+                graphMetrics.connectedComponents(),
+                graphMetrics.componentRadii(), graphMetrics.componentDiameters(),
+                connectedPairs, n * (n - 1) / 2,
                 microGroup,
                 isolates.toArray(String[]::new),
                 stars.toArray(String[]::new),
@@ -211,6 +229,7 @@ public final class SociometricCalculator {
                                                int unidirectionalPairsCount, String[] categories,
                                                int[] antipathyIncoming, GscFormula formula,
                                                double mutualWeightSum) {
+        int maxWeight = maxWeight(matrix);
         int totalSelections = 0;
         int[] mutualPerPerson = new int[n];
         for (int i = 0; i < n; i++) {
@@ -233,15 +252,29 @@ public final class SociometricCalculator {
             gsc = 0;
         } else {
             double numerator = formula == GscFormula.MUTUAL ? 2d * mutualPairsCount : mutualWeightSum;
-            gsc = numerator / possibleSelections;
+            // нормируем на L^2, где L — наибольший вес выбора: на невзвешенных данных
+            // L = 1 и обе формулы совпадают, на ранжированных значение остаётся 0..1.
+            // Без этой нормировки сумма по упорядоченным парам даёт значения до L^2.
+            double weightSquare = formula == GscFormula.MUTUAL
+                    ? 1d : (double) maxWeight * maxWeight;
+            gsc = numerator / (possibleSelections * weightSquare);
         }
         double reciprocity = totalSelections == 0 ? 0 : (2d * mutualPairsCount) / totalSelections;
         double density = possibleSelections == 0 ? 0 : (double) totalSelections / possibleSelections;
 
+        // Знаменатель долей — все участники n, а не только отвечавшие:
+        // иначе показатель зависел бы от того, как импортированы данные,
+        // и «индекс изоляции» нельзя было бы сравнивать между опросами.
         int isolated = 0;
         int negative = 0;
         for (String category : categories) {
             StatusCategory value = StatusCategory.valueOf(category);
+            // не ответившие в числитель не идут: они не изолированы, про них нет данных.
+            // Знаменатель остаётся n, иначе показатель зависел бы от способа ввода данных
+            // и индексы разных опросов стали бы несравнимыми.
+            if (value.isNoData()) {
+                continue;
+            }
             if (value == StatusCategory.OUTSIDER || value == StatusCategory.ISOLATED) {
                 isolated++;
             }
@@ -271,7 +304,8 @@ public final class SociometricCalculator {
     }
 
     private static SociometricResult.GroupIndex computeSubGroup(SubGroup sub, int[][] matrix,
-                                                                int[][] antiMatrix, GscFormula formula) {
+                                                                int[][] antiMatrix, GscFormula formula,
+                                                                StatusThresholds activeThresholds) {
         int m = sub.indices().size();
         int[][] subMatrix = new int[m][m];
         for (int a = 0; a < m; a++) {
@@ -280,12 +314,22 @@ public final class SociometricCalculator {
             }
         }
         int[] incoming = new int[m];
+        int[] selectionsMade = new int[m];
         // Антипатии внутри подгруппы: без них индекс отвержения подгруппы был бы нулевым
         // и подгруппа с отвержением выглядела бы здоровой.
         int[] subAntipathyIncoming = new int[m];
+        boolean[] responded = new boolean[m];
         for (int a = 0; a < m; a++) {
             for (int b = 0; b < m; b++) {
-                if (a != b && antiMatrix[sub.indices().get(a)][sub.indices().get(b)] > 0) {
+                if (a == b) {
+                    continue;
+                }
+                int global = sub.indices().get(a);
+                if (matrix[global][sub.indices().get(b)] > 0 || antiMatrix[global][sub.indices().get(b)] > 0) {
+                    selectionsMade[a]++;
+                    responded[a] = true;
+                }
+                if (antiMatrix[global][sub.indices().get(b)] > 0) {
                     subAntipathyIncoming[a]++;
                 }
             }
@@ -301,14 +345,34 @@ public final class SociometricCalculator {
                     incoming[a]++;
                 }
                 if (subMatrix[a][b] > 0 && subMatrix[b][a] > 0) {
+                    // упорядоченная сумма: пара (a,b) и (b,a) считаются раздельно,
+                    // иначе взвешенная формула дала бы половину 2M/n(n-1)
                     mutualWeightSum += (double) subMatrix[a][b] * subMatrix[b][a];
-                } else if (subMatrix[a][b] > 0 || subMatrix[b][a] > 0) {
+                }
+            }
+        }
+        // односторонние пары считаем один раз, перебирая только a < b
+        for (int a = 0; a < m; a++) {
+            for (int b = a + 1; b < m; b++) {
+                boolean forward = subMatrix[a][b] > 0;
+                boolean backward = subMatrix[b][a] > 0;
+                if (forward != backward) {
                     unidirectionalCount++;
                 }
             }
         }
         int mutual = countMutualPairs(subMatrix);
-        String[] categories = categoriesRaw(incoming, subAntipathyIncoming, StatusThresholds.defaults());
+        // пороги считаем по выборкам самой подгруппы, иначе статус подгруппы
+        // сравнивался бы с порогами всего класса
+        double subMean = mean(incoming);
+        StatusThresholds subThresholds = new StatusThresholds(
+                activeThresholds.star(), activeThresholds.preferred(), activeThresholds.accepted(),
+                activeThresholds.mostRejected(), activeThresholds.auto());
+        Limits subLimits = effectiveThresholds(subThresholds, subMean, stdDev(incoming, subMean));
+        StatusThresholds subEffective = new StatusThresholds(subLimits.star(), subLimits.preferred(),
+                subLimits.accepted(), subLimits.mostRejected(), subThresholds.auto());
+        String[] categories = categoriesRaw(incoming, subAntipathyIncoming, selectionsMade,
+                responded, subEffective);
         return new SociometricResult.GroupIndex(sub.name(), m,
                 computeIndices(m, subMatrix, mutual, unidirectionalCount, categories,
                         subAntipathyIncoming, formula, mutualWeightSum));
@@ -377,27 +441,45 @@ public final class SociometricCalculator {
     // ------------------------------------------------------------------
 
     /**
-     * Категория статуса по симпатиям.
-     * «Изолированный» — не выбран никем, но сам кого-то выбирает;
-     * «Аутсайдер» — не выбран и сам не выбирает; их исключаем из порогов.
+     * Категория статуса.
+     *
+     * <p>Порядок проверки (description.md, §15 и §18):
+     * <ol>
+     *   <li>{@code NO_DATA} — участник не сделал ни одного выбора; данных нет,
+     *       и подставлять вместо них «ноль симпатий» нельзя (§12): это занижает
+     *       индексы изоляции и отрицательности.</li>
+     *   <li>положительные категории — по числу входящих симпатий;</li>
+     *   <li>{@code REJECTED} — по входящим антипатиям: раньше этот статус выдавался
+     *       за «мало симпатий», хотя по спецификации отвергает именно антипатия;</li>
+     *   <li>{@code LOW_ACCEPTED} — получил хоть что-то, но меньше порога «принятый»;</li>
+     *   <li>{@code ISOLATED} — не выбран, но сам выбирает; {@code OUTSIDER} — не выбран и не выбирает.</li>
+     * </ol>
      */
-    static String[] categoriesRaw(int[] incoming, int[] selectionsMade, StatusThresholds thresholds) {
+    static String[] categoriesRaw(int[] incoming, int[] antipathyIncoming, int[] selectionsMade,
+                                  boolean[] responded, StatusThresholds thresholds) {
         String[] categories = new String[incoming.length];
+        int rejectionBar = Math.max(1, thresholds.mostRejected());
         for (int i = 0; i < incoming.length; i++) {
             int received = incoming[i];
-            if (received == 0) {
-                categories[i] = (selectionsMade[i] > 0
-                        ? StatusCategory.ISOLATED : StatusCategory.OUTSIDER).name();
+            if (responded != null && !responded[i]) {
+                categories[i] = StatusCategory.NO_DATA.name();
                 continue;
             }
-            if (received >= thresholds.star()) {
+            if (received == 0) {
+                // ноль входящих симпатий проверяем первым: иначе порог «accepted»,
+                // опустившийся до нуля, отдал бы изолированных «принятым»
+                categories[i] = antipathyIncoming[i] >= rejectionBar
+                        ? StatusCategory.REJECTED.name()
+                        : (selectionsMade[i] > 0
+                                ? StatusCategory.ISOLATED.name() : StatusCategory.OUTSIDER.name());
+            } else if (received >= thresholds.star()) {
                 categories[i] = StatusCategory.STAR.name();
             } else if (received >= thresholds.preferred()) {
                 categories[i] = StatusCategory.PREFERRED.name();
             } else if (received >= thresholds.accepted()) {
                 categories[i] = StatusCategory.ACCEPTED.name();
             } else {
-                categories[i] = StatusCategory.REJECTED.name();
+                categories[i] = StatusCategory.LOW_ACCEPTED.name();
             }
         }
         return categories;
@@ -419,42 +501,101 @@ public final class SociometricCalculator {
         return categories;
     }
 
-    /** Пороги «среднее ± σ» либо заданные вручную: {star, preferred, accepted, mostRejected}. */
-    public static int[] effectiveThresholds(StatusThresholds thresholds, double mean, double sd) {
+    /**
+     * Пороги «среднее ± σ» либо заданные вручную.
+     *
+     * <p>{@code preferred} считается как {@code floor(mean) + 1}, то есть строго
+     * выше среднего: при {@code ceil(mean)} участник, получивший ровно среднее
+     * число голосов, попадал в «предпочитаемые», хотя README и §15 обещают
+     * «выше среднего».
+     *
+     * <p>Значение {@link Integer#MAX_VALUE} больше не возвращается: оно попадало
+     * в отчёт и печаталось как «звезда от 2147483647». Если параметр не задан,
+     * берётся заведомо недостижимое, но осмысленное значение — максимум плюс один.
+     *
+     * @param degenerate true, если все участники получили одинаковое число выборов
+     *                   и «среднее ± σ» не разделяет группу (σ = 0)
+     */
+    public static Limits effectiveThresholds(StatusThresholds thresholds, double mean, double sd) {
+        int ceiling = (int) Math.ceil(mean) + 1;
         int mostRejected = thresholds.mostRejected() == null ? 2 : thresholds.mostRejected();
         if (!thresholds.auto()) {
-            return new int[]{
-                    thresholds.star() == null ? Integer.MAX_VALUE : thresholds.star(),
-                    thresholds.preferred() == null ? Integer.MAX_VALUE : thresholds.preferred(),
-                    thresholds.accepted() == null ? 0 : thresholds.accepted(),
-                    mostRejected};
+            return new Limits(
+                    thresholds.star() == null ? ceiling : thresholds.star(),
+                    thresholds.preferred() == null ? ceiling : thresholds.preferred(),
+                    thresholds.accepted() == null ? 1 : thresholds.accepted(),
+                    Math.max(1, mostRejected), false);
         }
         if (sd <= 0) {
-            return new int[]{Integer.MAX_VALUE, Integer.MAX_VALUE, 0, mostRejected};
+            // вырожденный случай: разброса нет, «среднее ± σ» не работает
+            return new Limits((int) Math.ceil(mean) + 1, (int) Math.floor(mean) + 1,
+                    Math.max(1, (int) Math.floor(mean) - 1), Math.max(1, mostRejected), true);
         }
-        return new int[]{
-                (int) Math.ceil(mean + sd),
-                (int) Math.ceil(mean),
-                (int) Math.max(0, Math.floor(mean - sd)),
-                mostRejected};
+        int preferred = (int) Math.floor(mean) + 1;
+        // нижняя граница «принятых» не может опуститься до нуля: ноль входящих
+        // выборов — это изоляция, а не принятие
+        int accepted = Math.max(1, (int) Math.floor(mean - sd));
+        int star = Math.max((int) Math.ceil(mean + sd), preferred + 1);
+        return new Limits(star, preferred, accepted, Math.max(1, mostRejected), false);
+    }
+
+    /** Пороги, приведённые к целым, и признак вырожденной выборки. */
+    public record Limits(int star, int preferred, int accepted, int mostRejected,
+                         boolean degenerate) {
     }
 
     // ------------------------------------------------------------------
     // граф
     // ------------------------------------------------------------------
 
-    static boolean[][] graphOf(int[][] matrix, int[][] antiMatrix) {
+    /**
+     * Граф предпочтений: только симпатии.
+     *
+     * <p>Раньше сюда попадали и антипатии, из-за чего аутсайдер, не получивший ни
+     * одной симпатии, оказывался «связанным» с группой, а метрики плотности и
+     * расстояний менялись от добавления отрицательного критерия. Отрицательные
+     * связи — отдельный слой, их показывает социограмма, но в метрики структуры
+     * они не входят (§13, §19).
+     */
+    static boolean[][] graphOf(int[][] matrix) {
         int n = matrix.length;
         boolean[][] graph = new boolean[n][n];
         for (int i = 0; i < n; i++) {
             for (int j = 0; j < n; j++) {
-                if (i != j && (matrix[i][j] > 0 || matrix[j][i] > 0
-                        || antiMatrix[i][j] > 0 || antiMatrix[j][i] > 0)) {
+                if (i != j && (matrix[i][j] > 0 || matrix[j][i] > 0)) {
                     graph[i][j] = true;
                 }
             }
         }
         return graph;
+    }
+
+    /** Разбиение на связные компоненты: список списков индексов. */
+    static List<List<Integer>> components(boolean[][] graph) {
+        int n = graph.length;
+        boolean[] seen = new boolean[n];
+        List<List<Integer>> result = new ArrayList<>();
+        for (int start = 0; start < n; start++) {
+            if (seen[start]) {
+                continue;
+            }
+            List<Integer> component = new ArrayList<>();
+            Deque<Integer> queue = new ArrayDeque<>();
+            queue.add(start);
+            seen[start] = true;
+            while (!queue.isEmpty()) {
+                int current = queue.poll();
+                component.add(current);
+                for (int next = 0; next < n; next++) {
+                    if (graph[current][next] && !seen[next]) {
+                        seen[next] = true;
+                        queue.add(next);
+                    }
+                }
+            }
+            result.add(component);
+        }
+        return result;
     }
 
     private static int[] degrees(boolean[][] graph) {
@@ -494,28 +635,86 @@ public final class SociometricCalculator {
     }
 
     /** @return {диаметр, радиус} графа; для одиночной вершины оба равны 0. */
-    private static int[] diameterAndRadius(int[][] distances) {
+    /**
+     * Диаметр и радиус.
+     *
+     * <p>Для связного графа — обычные определения. Для несвязного конечный
+     * диаметр не определён (между вершинами разных компонент нет пути), поэтому
+     * возвращаем {@code null}. Радиус же определён: это минимум эксцентриситетов
+     * среди вершин с конечным эксцентриситетом, то есть минимум по компонентам.
+     * Раньше эксцентриситет изолированной вершины считался равным нулю, и радиус
+     * всего графа схлопывался в ноль.
+     *
+     * @return {diameter, radius}; diameter = null, если граф несвязен
+     */
+    private static GraphMetrics diameterAndRadius(int[][] distances, List<List<Integer>> components) {
         int n = distances.length;
-        int diameter = 0;
+        boolean connected = components.size() <= 1;
+        Integer diameter = null;
         int radius = Integer.MAX_VALUE;
-        for (int i = 0; i < n; i++) {
-            int eccentricity = 0;
-            for (int j = 0; j < n; j++) {
-                if (i != j && distances[i][j] > 0) {
-                    eccentricity = Math.max(eccentricity, distances[i][j]);
+        int maxComponentDiameter = 0;
+        List<Integer> componentRadii = new ArrayList<>();
+        List<Integer> componentDiameters = new ArrayList<>();
+        for (List<Integer> component : components) {
+            int componentRadius = Integer.MAX_VALUE;
+            int componentDiameter = 0;
+            for (int i : component) {
+                int eccentricity = 0;
+                for (int j : component) {
+                    if (i != j) {
+                        eccentricity = Math.max(eccentricity, distances[i][j]);
+                    }
+                }
+                componentDiameter = Math.max(componentDiameter, eccentricity);
+                if (component.size() > 1) {
+                    componentRadius = Math.min(componentRadius, eccentricity);
                 }
             }
-            diameter = Math.max(diameter, eccentricity);
-            if (n > 1) {
-                radius = Math.min(radius, eccentricity);
+            componentRadii.add(componentRadius == Integer.MAX_VALUE ? 0 : componentRadius);
+            componentDiameters.add(componentDiameter);
+            maxComponentDiameter = Math.max(maxComponentDiameter, componentDiameter);
+            if (componentRadius != Integer.MAX_VALUE) {
+                radius = Math.min(radius, componentRadius);
             }
         }
-        return new int[]{diameter, radius == Integer.MAX_VALUE ? 0 : radius};
+        int finalRadius = radius == Integer.MAX_VALUE ? 0 : radius;
+        if (n <= 1) {
+            return new GraphMetrics(0, 0, Math.max(1, components.size()),
+                    new int[]{0}, new int[]{0});
+        }
+        return new GraphMetrics(connected ? maxComponentDiameter : null, finalRadius,
+                components.size(),
+                componentRadii.stream().mapToInt(Integer::intValue).toArray(),
+                componentDiameters.stream().mapToInt(Integer::intValue).toArray());
+    }
+
+    /**
+     * Метрики графа предпочтений.
+     *
+     * @param diameter           {@code null}, если граф несвязен: конечное значение не определено
+     * @param radius             минимум эксцентриситетов среди вершин с конечным эксцентриситетом
+     * @param connectedComponents число связных компонент
+     * @param componentRadii     радиус каждой компоненты
+     * @param componentDiameters диаметр каждой компоненты
+     */
+    public record GraphMetrics(Integer diameter, int radius, int connectedComponents,
+                               int[] componentRadii, int[] componentDiameters) {
     }
 
     // ------------------------------------------------------------------
     // вспомогательное
     // ------------------------------------------------------------------
+
+    /** Наибольший вес одного выбора в матрице; 0, если выборов нет. */
+    static int maxWeight(int[][] matrix) {
+        int max = 0;
+        for (int[] row : matrix) {
+            for (int value : row) {
+                max = Math.max(max, value);
+            }
+        }
+        return max;
+    }
 
     static IndexMap buildIndexMap(List<Participant> participants) {
         Set<String> unique = new LinkedHashSet<>();

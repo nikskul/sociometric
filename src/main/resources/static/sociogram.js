@@ -12,12 +12,14 @@
  */
 const Soc = (() => {
 
-    const RING_ORDER = ['STAR', 'PREFERRED', 'ACCEPTED', 'ISOLATED', 'REJECTED', 'OUTSIDER'];
+    const RING_ORDER = ['STAR', 'PREFERRED', 'ACCEPTED', 'LOW_ACCEPTED', 'ISOLATED', 'REJECTED',
+        'OUTSIDER', 'NO_DATA'];
 
     const COLORS = {
         STAR: '#2e9e4f',
         PREFERRED: '#8fd19a',
         ACCEPTED: '#bcd6f5',
+        LOW_ACCEPTED: '#dbe8fa',
         ISOLATED: '#f5c26b',
         REJECTED: '#e88b8b',
         OUTSIDER: '#9aa3b2',
@@ -28,12 +30,15 @@ const Soc = (() => {
         STAR: 'Звезда',
         PREFERRED: 'Предпочитаемый',
         ACCEPTED: 'Принятый',
+        LOW_ACCEPTED: 'Низкопринятый',
         ISOLATED: 'Изолированный',
         REJECTED: 'Отвергаемый',
-        OUTSIDER: 'Аутсайдер'
+        OUTSIDER: 'Аутсайдер',
+        NO_DATA: 'Нет данных'
     };
 
-    const RING_TITLES = ['звёзды', 'предпочитаемые', 'принятые', 'изолированные', 'отвергаемые', 'аутсайдеры'];
+    const RING_TITLES = ['звёзды', 'предпочитаемые', 'принятые', 'низкопринятые', 'изолированные',
+        'отвергаемые', 'аутсайдеры', 'без данных'];
 
     const GAP = 6;        // зазор между соседними узлами
     const MARGIN = 34;    // поле вокруг схемы

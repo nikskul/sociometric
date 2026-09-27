@@ -10,6 +10,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -124,23 +125,46 @@ class SociometricCalculatorTest {
                 {1, 1, 0, 1},
                 {2, 2, 1, 0}}, result.distances());
         assertEquals(1.3333, result.meanDistance(), 1e-4);
-        assertEquals(2, result.diameter());
+        assertEquals(Integer.valueOf(2), result.diameter());
         assertEquals(1, result.radius(), "Вера (C) — центр графа, расстояние до всех равно 1");
+        assertEquals(1, result.connectedComponents());
+        assertArrayEquals(new int[]{1}, result.componentRadii());
+        assertArrayEquals(new int[]{2}, result.componentDiameters());
         assertEquals(6, result.connectedPairs());
-        assertEquals(6, result.reachablePairs());
+        assertEquals(6, result.possiblePairs());
     }
 
     @Test
-    @DisplayName("Изолированный (выбирает сам) отличается от аутсайдера (не выбирает никого)")
-    void separatesIsolatedFromOutsider() {
+    @DisplayName("Изолированный, аутсайдер и «нет данных» — три разные категории")
+    void separatesIsolatedOutsiderAndNoData() {
+        List<Participant> people = List.of(new Participant("A", "Аня"), new Participant("B", "Боря"),
+                new Participant("C", "Вера"), new Participant("D", "Даня"));
+        // A выбрал B. Ответили A, B и C; D не отвечал вовсе.
+        SociometricResult result = SociometricCalculator.calculate(
+                new SurveyData(people, List.of(
+                        SurveyData.ChoiceEntry.of(SurveyData.ChoiceType.SYMPATHY, "A", "B")),
+                        3, false, GscFormula.MUTUAL, java.util.Set.of("A", "B", "C")));
+
+        assertEquals(StatusCategory.ISOLATED.name(), result.categories()[0], "A выбирал, но его не выбрали");
+        assertEquals(StatusCategory.PREFERRED.name(), result.categories()[1], "B выбран единственным A");
+        assertEquals(StatusCategory.OUTSIDER.name(), result.categories()[2],
+                "C отвечал «никого не выбрал» — это ответ, а не отсутствие ответа");
+        assertEquals(StatusCategory.NO_DATA.name(), result.categories()[3], "D не отвечал — данных нет");
+        assertArrayEquals(new String[]{"A", "C"}, result.isolates(),
+                "не ответивший не изолирован, его в списке изолированных быть не должно");
+    }
+
+    @Test
+    @DisplayName("Без отметок об ответе отвечавшим считается сделавший хотя бы один выбор")
+    void fallsBackToSelectionsWhenNoResponseMarks() {
         SociometricResult result = SociometricCalculator.calculate(
                 data(List.of(new Participant("A", "Аня"), new Participant("B", "Боря"),
                         new Participant("C", "Вера")), 3, "A->B"));
 
-        assertEquals(StatusCategory.ISOLATED.name(), result.categories()[0], "A не выбран, но выбирает");
-        assertEquals(StatusCategory.STAR.name(), result.categories()[1], "B выбран единственным A");
-        assertEquals(StatusCategory.OUTSIDER.name(), result.categories()[2], "C не выбран и не выбирает");
-        assertArrayEquals(new String[]{"A", "C"}, result.isolates());
+        assertEquals(StatusCategory.ISOLATED.name(), result.categories()[0]);
+        assertEquals(StatusCategory.PREFERRED.name(), result.categories()[1]);
+        assertEquals(StatusCategory.NO_DATA.name(), result.categories()[2],
+                "без отметок «не выбрал» от «не ответил» не отличить — считаем вторым");
     }
 
     @Test
@@ -211,20 +235,27 @@ class SociometricCalculatorTest {
                 new SurveyData(ABCD, choices, 3, true, GscFormula.MUTUAL_DOUBLE_PASS)).indices().gsc();
 
         assertEquals(2.0 / 12, mutual, 1e-9, "2M/(n(n-1)) считает только факт взаимности");
-        assertEquals(6.0 / 12, doublePass, 1e-9, "сумма Aij*Aji учитывает веса: 3*2/12");
+        // L = 3 — максимальный вес в матрице; нормировка на L^2 держит коэффициент в 0..1,
+        // иначе на ранжированных данных сумма весов легко переваливала за единицу
+        assertEquals(2 * 3.0 * 2 / (4 * 3 * 9), doublePass, 1e-9,
+                "Σ Aij·Aji / (n(n-1)·L²) с удвоением за упорядоченные пары");
     }
 
     @Test
-    @DisplayName("Несвязный граф: расстояния -1, средний путь считается только по достижимым парам")
+    @DisplayName("Несвязный граф: расстояния -1, средний путь по достижимым парам, диаметр null")
     void handlesDisconnectedGraph() {
         SociometricResult result = SociometricCalculator.calculate(
                 data(ABCD, 3, "A->B", "B->A", "C->D", "D->C"));
 
         assertEquals(-1, result.distances()[0][2]);
         assertEquals(2, result.connectedPairs());
-        assertEquals(6, result.reachablePairs());
+        assertEquals(6, result.possiblePairs());
         assertEquals(1.0, result.meanDistance(), 1e-9);
-        assertEquals(1, result.diameter(), "диаметр двух отдельных пар равен 1");
+        assertNull(result.diameter(), "у несвязного графа диаметр не определён");
+        assertEquals(2, result.connectedComponents());
+        assertArrayEquals(new int[]{1, 1}, result.componentRadii());
+        assertArrayEquals(new int[]{1, 1}, result.componentDiameters());
+        assertEquals(1, result.radius(), "радиус — минимум по компонентам, а не бесконечность");
         assertEquals(0.3333, result.indices().density(), 1e-4);
     }
 
@@ -238,10 +269,11 @@ class SociometricCalculatorTest {
         assertEquals(0, result.indices().gsc());
         assertEquals(0, result.indices().reciprocityIndex());
         assertEquals(0, result.indices().density());
-        assertEquals(0, result.diameter());
+        assertEquals(Integer.valueOf(0), result.diameter(), "единственная вершина образует связный граф");
         assertEquals(0, result.radius());
         assertEquals(0.0, result.meanDistance());
-        assertEquals(StatusCategory.OUTSIDER.name(), result.categories()[0]);
+        assertEquals(StatusCategory.NO_DATA.name(), result.categories()[0],
+                "единственный участник ничего не выбрал, и ответа от него не было");
     }
 
     @Test

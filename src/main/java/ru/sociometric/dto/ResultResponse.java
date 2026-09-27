@@ -27,6 +27,9 @@ import java.util.Map;
  * @param strongest         коды самой тесной микрогруппы
  * @param graph             метрики графа предпочтений
  * @param experts           согласованность экспертных оценок, null если оценок нет
+ * @param gscFormula        применённая формула коэффициента групповой взаимности
+ * @param degenerateThresholds true, если все получили одинаковое число выборов
+ *                              и «среднее ± σ» не разделяет группу
  */
 public record ResultResponse(
         Long surveyId,
@@ -49,7 +52,9 @@ public record ResultResponse(
         List<String> isolates,
         List<String> strongest,
         GraphDto graph,
-        ExpertDto experts) {
+        ExpertDto experts,
+        String gscFormula,
+        boolean degenerateThresholds) {
 
     /**
      * Результат по одному участнику.
@@ -126,13 +131,28 @@ public record ResultResponse(
     public record UnidirectionalPairDto(int a, int b, int weight) {
     }
 
-    /** Метрики графа предпочтений. */
+    /**
+     * Метрики графа предпочтений (только симпатии).
+     *
+     * @param meanDistance  средняя длина кратчайшего пути по достижимым парам
+     * @param diameter      диаметр; null, если граф несвязен — конечное значение не определено
+     * @param radius        минимум эксцентриситетов среди вершин с конечным эксцентриситетом
+     * @param connectedComponents число связных компонент
+     * @param componentRadii     радиус каждой компоненты
+     * @param componentDiameters диаметр каждой компоненты
+     * @param connectedPairs число пар участников, между которыми есть путь
+     * @param possiblePairs  общее число неупорядоченных пар n(n-1)/2
+     * @param distances     матрица кратчайших расстояний
+     */
     public record GraphDto(
             double meanDistance,
-            int diameter,
+            Integer diameter,
             int radius,
+            int connectedComponents,
+            int[] componentRadii,
+            int[] componentDiameters,
             int connectedPairs,
-            int reachablePairs,
+            int possiblePairs,
             int[][] distances) {
     }
 
@@ -146,6 +166,10 @@ public record ResultResponse(
      * @param pearsonWithStatus  корреляция Пирсона между оценкой и статусом
      * @param spearmanWithStatus ранговая корреляция Спирмена
      * @param ranking            сопоставление рангов «эксперты против социометрии»
+     * @param kendallExperts     число экспертов, участвовавших в расчёте W
+     * @param kendallParticipants число участников, оценённых всеми экспертами
+     *                            (Kendall W требует сбалансированного прямоугольника;
+     *                            остальные выпадают целиком, а не заменяются средним рангом)
      */
     public record ExpertDto(
             List<String> experts,
@@ -153,7 +177,9 @@ public record ResultResponse(
             Double kendallW,
             Double pearsonWithStatus,
             Double spearmanWithStatus,
-            List<RankingRow> ranking) {
+            List<RankingRow> ranking,
+            int kendallExperts,
+            int kendallParticipants) {
     }
 
     /**
@@ -163,11 +189,14 @@ public record ResultResponse(
      * @param sd     разброс оценок
      * @param min    минимальный балл
      * @param max    максимальный балл
+     * @param mean   средний балл экспертов; null, если не оценён ни разу.
+     *                Подставлять ноль нельзя: ноль — это оценка «самый непопулярный»,
+     *                и в корреляцию попал бы вымышленный балл
      * @param votes  сколько экспертов оценили
      * @param statusReceived число полученных симпатий
      */
     public record ParticipantScore(
-            String code, String name, double mean, double sd, int min, int max, int votes, int statusReceived) {
+            String code, String name, Double mean, Double sd, int min, int max, int votes, int statusReceived) {
     }
 
     /**
@@ -177,8 +206,12 @@ public record ResultResponse(
      * @param expertRank     место по средней экспертной оценке
      * @param sociometricRank место по социометрическому статусу
      * @param difference     expertRank - sociometricRank
+     *
+     * <p>Ранги дробные: при ничьих участники получают один средний ранг, иначе
+     * «расхождение» зависело бы от того, в каком порядке участники попали в список.
      */
     public record RankingRow(
-            int position, String code, String name, int expertRank, int sociometricRank, int difference) {
+            int position, String code, String name, double expertRank, double sociometricRank,
+            double difference) {
     }
 }

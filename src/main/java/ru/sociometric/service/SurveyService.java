@@ -3,10 +3,12 @@ package ru.sociometric.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import ru.sociometric.domain.Choice;
 import ru.sociometric.domain.ChoiceKind;
 import ru.sociometric.domain.Participant;
+import ru.sociometric.domain.ResponseMark;
 import ru.sociometric.domain.Survey;
 import ru.sociometric.domain.Thresholds;
 import ru.sociometric.dto.ChoicesRequest;
@@ -18,6 +20,7 @@ import ru.sociometric.dto.ThresholdsDto;
 import ru.sociometric.repository.ChoiceRepository;
 import ru.sociometric.repository.ExpertRatingRepository;
 import ru.sociometric.repository.SurveyRepository;
+import ru.sociometric.repository.ResponseMarkRepository;
 import ru.sociometric.web.BadRequestException;
 import ru.sociometric.web.NotFoundException;
 
@@ -37,14 +40,17 @@ public class SurveyService {
 
     private final SurveyRepository surveys;
     private final ChoiceRepository choices;
+    private final ResponseMarkRepository responses;
     private final ExpertRatingRepository experts;
     private final ObjectMapper json;
 
     public SurveyService(SurveyRepository surveys, ChoiceRepository choices,
-                         ExpertRatingRepository experts, ObjectMapper json) {
+                         ExpertRatingRepository experts, ResponseMarkRepository responses,
+                         ObjectMapper json) {
         this.surveys = surveys;
         this.choices = choices;
         this.experts = experts;
+        this.responses = responses;
         this.json = json;
     }
 
@@ -110,6 +116,16 @@ public class SurveyService {
             choices.deleteBySurveyIdAndKind(id, ChoiceKind.valueOf(request.kind().name()));
         }
 
+        // отмечаем ответившим до проверки выборов: «отвечал, но никого не выбрал» —
+        // это тоже ответ, и он не должен превращаться в «не ответил»
+        if (request.respondent() != null && !request.respondent().isBlank()) {
+            String code = request.respondent();
+            if (!codes.contains(code)) {
+                throw new BadRequestException("Респондент " + code + " не найден среди участников");
+            }
+            markResponded(id, code);
+        }
+
         Set<String> seen = new LinkedHashSet<>();
         List<Choice> entities = new ArrayList<>();
         List<String> problems = new ArrayList<>();
@@ -150,9 +166,27 @@ public class SurveyService {
             throw new BadRequestException(String.join("; ", problems));
         }
         choices.saveAll(entities);
+        // без явного respondent отвечавшими считаем всех, кто что-то выбрал
+        if (request.respondent() == null || request.respondent().isBlank()) {
+            entities.stream().map(Choice::getRespondent).distinct().forEach(code -> markResponded(id, code));
+        }
         survey.setUpdatedAt(Instant.now());
         surveys.save(survey);
         return toResponse(survey);
+    }
+
+    /** Отмечает участника ответившим. Публичный метод: импорт тоже знает про ответы. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void markResponded(Long surveyId, String respondent) {
+        if (responses.findBySurveyIdAndRespondent(surveyId, respondent).isEmpty()) {
+            responses.save(new ResponseMark(surveyId, respondent));
+        }
+    }
+
+    /** Снимает все отметки об ответе: данных об ответах больше нет. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void clearResponses(Long surveyId) {
+        responses.deleteBySurveyId(surveyId);
     }
 
     @Transactional
@@ -160,6 +194,8 @@ public class SurveyService {
         Survey survey = requireSurvey(id);
         if (kind == null || kind.isBlank() || "all".equalsIgnoreCase(kind)) {
             choices.deleteBySurveyId(id);
+            // ответов больше нет — снимаем и отметки об ответе
+            responses.deleteBySurveyId(id);
         } else {
             choices.deleteBySurveyIdAndKind(id, parseKind(kind));
         }
@@ -287,6 +323,15 @@ public class SurveyService {
      * Если код участника изменился, выборы и оценки, ссылавшиеся на старый код,
      * должны уехать вместе с ним.
      */
+    /**
+     * Переносит выборы и отметки об ответе на новый состав участников.
+     *
+     * <p>Коды сопоставляются по позиции, но только если это единственное возможное
+     * прочтение: если старый код остался в списке на другой позиции, участника
+     * вставили в середину, и позиционная перестановка молча перевесила бы выборы
+     * на чужих людей. В таком случае выборы не трогаем — лучше потерять
+     * автоматическое переименование, чем испортить данные.
+     */
     private void remapChoices(Survey survey, List<Participant> before, List<Participant> after) {
         if (before.isEmpty() || before.size() != after.size()) {
             return;
@@ -296,16 +341,60 @@ public class SurveyService {
         if (oldCodes.equals(newCodes)) {
             return;
         }
+
         Map<String, String> renamed = new HashMap<>();
         for (int i = 0; i < oldCodes.size(); i++) {
-            renamed.put(oldCodes.get(i), newCodes.get(i));
-        }
-        for (Choice choice : choices.findBySurveyIdOrderById(survey.getId())) {
-            if (renamed.containsKey(choice.getRespondent())) {
-                choice.setRespondent(renamed.get(choice.getRespondent()));
+            String oldCode = oldCodes.get(i);
+            String newCode = newCodes.get(i);
+            if (oldCode.equals(newCode)) {
+                continue;
             }
-            if (renamed.containsKey(choice.getTarget())) {
-                choice.setTarget(renamed.get(choice.getTarget()));
+            int oldPosition = oldCodes.indexOf(oldCode);
+            int newPosition = newCodes.indexOf(oldCode);
+            if (newPosition >= 0 && newPosition != oldPosition) {
+                // тот же код переехал на другую позицию: это вставка, а не переименование
+                return;
+            }
+            if (newCodes.subList(0, i).contains(newCode)) {
+                // новый код уже занят другим участником — переименование создаст дубль
+                return;
+            }
+            renamed.put(oldCode, newCode);
+        }
+        if (renamed.isEmpty()) {
+            return;
+        }
+
+        Long surveyId = survey.getId();
+        List<Choice> stale = new ArrayList<>();
+        for (Choice choice : choices.findBySurveyIdOrderById(surveyId)) {
+            String from = renamed.getOrDefault(choice.getRespondent(), choice.getRespondent());
+            String to = renamed.getOrDefault(choice.getTarget(), choice.getTarget());
+            if (from.equals(to)) {
+                // после переименования участник «выбрал бы самого себя» — выбор не имеет смысла
+                stale.add(choice);
+                continue;
+            }
+            choice.setRespondent(from);
+            choice.setTarget(to);
+        }
+        if (!stale.isEmpty()) {
+            choices.deleteAll(stale);
+        }
+
+        Set<String> newCodeSet = new LinkedHashSet<>(newCodes);
+        for (ResponseMark mark : responses.findBySurveyId(surveyId)) {
+            String respondent = renamed.getOrDefault(mark.getRespondent(), mark.getRespondent());
+            if (!newCodeSet.contains(respondent)) {
+                // участника убрали из списка — отметка об ответе больше не нужна
+                responses.deleteByRespondent(surveyId, mark.getRespondent());
+                continue;
+            }
+            if (!respondent.equals(mark.getRespondent())) {
+                // код сменился, а пара (опрос, респондент) уже занята — обновляем
+                // через удаление и вставку, иначе нарушится уникальный индекс
+                responses.deleteByRespondent(surveyId, mark.getRespondent());
+                responses.save(new ResponseMark(surveyId, respondent));
             }
         }
     }
@@ -313,14 +402,14 @@ public class SurveyService {
     public SurveyResponse toResponse(Survey survey) {
         long sympathy = choices.countBySurveyIdAndKind(survey.getId(), ChoiceKind.SYMPATHY);
         long antipathy = choices.countBySurveyIdAndKind(survey.getId(), ChoiceKind.ANTIPATHY);
-        Set<String> responded = new LinkedHashSet<>();
-        choices.findBySurveyIdOrderById(survey.getId())
-                .forEach(choice -> responded.add(choice.getRespondent()));
+        // ответившие считаются по отметкам, а не по наличию строк выбора:
+        // ответ «никого не выбрал» не оставляет ни одной строки
+        int responded = (int) responses.countBySurveyId(survey.getId());
         return new SurveyResponse(survey.getId(), survey.getName(), survey.getDescription(),
                 survey.getChoicesLimit(), survey.isCollectAntipathy(), survey.isRanks(),
                 survey.isAutoThresholds(), ThresholdsDto.from(survey.getThresholds()),
                 read(survey.getParticipantsJson()), sympathy, antipathy,
-                experts.countBySurveyId(survey.getId()), responded.size(),
+                experts.countBySurveyId(survey.getId()), responded,
                 survey.getCreatedAt(), survey.getUpdatedAt());
     }
 

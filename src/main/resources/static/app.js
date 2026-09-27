@@ -127,11 +127,20 @@ async function refreshResult() {
     $('#resultTitle').textContent = `Результаты: ${state.result.name}`;
 }
 
+function respondentCode() {
+    const list = participants();
+    const me = list[state.respondent];
+    return me ? me.code : null;
+}
+
 /** Сохранить изменения выборов: удалённое убираем, новое добавляем. */
 async function persistChoices() {
     const body = {
         kind: 'SYMPATHY',
         replace: false,
+        // код респондента нужен, чтобы сервер отметил ответ: «отвечал, но никого
+        // не выбрал» не оставляет ни одной строки выбора и иначе теряется
+        respondent: respondentCode(),
         choices: state.choices.map(c => ({kind: c.kind, from: c.from, to: c.to, rank: c.rank ?? null, weight: c.weight || 1}))
     };
     state.current = await api(`/api/surveys/${state.current.id}/choices`, {method: 'POST', body: JSON.stringify(body)});
@@ -143,6 +152,7 @@ async function replaceAllChoices() {
     const body = {
         kind: 'SYMPATHY',
         replace: true,
+        respondent: respondentCode(),
         choices: state.choices.map(c => ({kind: c.kind, from: c.from, to: c.to, rank: c.rank ?? null, weight: c.weight || 1}))
     };
     state.current = await api(`/api/surveys/${state.current.id}/choices`, {method: 'POST', body: JSON.stringify(body)});
@@ -397,11 +407,16 @@ function renderResults() {
     const graphCard = el('div', {class: 'card'},
         el('h2', {}, 'Структура группы'),
         el('div', {class: 'tiles'},
-            tile('Диаметр графа', graph.diameter, 'наибольшее расстояние между участниками'),
+            tile('Диаметр графа', graph.diameter === null || graph.diameter === undefined
+                    ? '—' : graph.diameter,
+                graph.diameter === null || graph.diameter === undefined
+                    ? `граф несвязен (${graph.connectedComponents} компонент)`
+                    : 'наибольшее расстояние между участниками'),
             tile('Радиус графа', graph.radius, 'наименьший максимальный путь'),
             tile('Среднее расстояние', num(graph.meanDistance, 3), 'по достижимым парам'),
-            tile('Плотность связности', pct(graph.reachablePairs / Math.max(1, graph.connectedPairs)),
-                `${graph.reachablePairs} из ${graph.connectedPairs} пар достижимы`)),
+            tile('Плотность связности',
+                pct(graph.connectedPairs / Math.max(1, graph.possiblePairs)),
+                `${graph.connectedPairs} из ${graph.possiblePairs} пар достижимы`)),
         r.strongest && r.strongest.length
             ? el('p', {class: 'hint'}, 'Самая тесная микрогруппа (взаимные связи): '
                 + r.strongest.map(c => (byCode(c) || {}).name || c).join(', '))
@@ -445,8 +460,12 @@ function renderResults() {
         el('p', {class: 'hint'},
             `Границы категорий: ${r.autoThresholds ? 'рассчитаны автоматически' : 'заданы вручную'} — `
             + `звезда от ${r.thresholds.star}, предпочитаемый от ${r.thresholds.preferred}, `
-            + `принятый от ${r.thresholds.accepted}; наиболее отвергаемый — `
-            + `${r.thresholds.mostRejected} антипатий.`),
+            + `принятый от ${r.thresholds.accepted}, низкопринятый — от 1; `
+            + `наиболее отвергаемый — ${r.thresholds.mostRejected} антипатий.`
+            + (r.degenerateThresholds
+                ? ' Все получили одинаковое число выборов, поэтому «среднее ± σ» '
+                    + 'не разделяет группу и пороги заданы по полуцелому среднему.'
+                : '')),
         el('div', {class: 'card'}, el('h2', {}, 'Распределение статусов'), distribution,
             el('div', {class: 'legend'}, ...dist.map(([name, count]) =>
                 el('span', {}, el('i', {class: 'swatch', style: `background:${Soc.COLORS[name] || '#ccd2dc'}`}),

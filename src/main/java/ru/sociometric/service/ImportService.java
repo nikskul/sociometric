@@ -66,6 +66,7 @@ public class ImportService {
         }
         if (replace) {
             choices.deleteBySurveyId(surveyId);
+            surveyService.clearResponses(surveyId);
         }
 
         Parsed parsed = looksLong(rows.get(0)) ? parseLong(rows, participants) : parseWide(rows, participants);
@@ -86,7 +87,7 @@ public class ImportService {
             if (filtered.size() != parsed.entries().size()) {
                 warnings.add("Антипатии отброшены: в настройках опроса они не собираются");
             }
-            parsed = new Parsed(filtered, warnings);
+            parsed = new Parsed(filtered, warnings, parsed.answered());
         }
 
         Set<String> seen = new LinkedHashSet<>();
@@ -100,6 +101,9 @@ public class ImportService {
             }
         }
         choices.saveAll(entities);
+        for (String respondent : parsed.answered()) {
+            surveyService.markResponded(surveyId, respondent);
+        }
         return new ImportResponse(entities.size(), warnings.size(), warnings, participants.size());
     }
 
@@ -109,14 +113,15 @@ public class ImportService {
         Survey survey = surveyService.requireSurvey(surveyId);
         List<Participant> participants = surveyService.participantsOf(survey);
         StringBuilder csv = new StringBuilder();
-        csv.append("type,respondent,target,rank\n");
-        csv.append("# Короткий формат: по строке один выбор. type = SYMPATHY (симпатия) или ANTIPATHY (антипатия).\n");
+        csv.append("From,To,Type,Rank\n");
+        csv.append("# По строке один выбор. Type = SYMPATHY (симпатия) или ANTIPATHY (антипатия).\n");
+        csv.append("# Rank — место в предпочтении, 1 = самый желательный. Для антипатий -1 = ненавижу больше всех.\n");
+        csv.append("# Строка с заполненным From и пустым To означает «отвечал, но никого не выбрал».\n");
         csv.append("# Участники этого опроса: ");
         participants.forEach(participant -> csv.append(participant.code()).append(' '));
         csv.append('\n');
-        for (Participant from : participants) {
-            csv.append("SYMPATHY,").append(from.code()).append(',').append(participants.get(0).code()).append(",1\n");
-        }
+        // строк-примеров нет: шаблон должен открываться пустым, иначе получатель
+        // заведёт фиктивные выборы, которые потом попадут в расчёт
         return csv.toString();
     }
 
@@ -240,21 +245,23 @@ public class ImportService {
     /** Похоже на длинный формат: есть колонка type/тип и respondent/кто. */
     private static boolean looksLong(String[] header) {
         boolean type = false;
-        boolean respondent = false;
-        boolean target = false;
+        boolean from = false;
+        boolean to = false;
         for (String value : header) {
             String lower = value.toLowerCase(Locale.ROOT);
-            if (lower.equals("type") || lower.equals("тип")) {
+            if (lower.equals("type") || lower.equals("тип") || lower.equals("вид")) {
                 type = true;
             }
-            if (lower.equals("respondent") || lower.equals("кто") || lower.equals("выбирает")) {
-                respondent = true;
+            if (lower.equals("from") || lower.equals("respondent") || lower.equals("кто")
+                    || lower.equals("выбирает") || lower.equals("отвечает")) {
+                from = true;
             }
-            if (lower.equals("target") || lower.equals("кого")) {
-                target = true;
+            if (lower.equals("to") || lower.equals("target") || lower.equals("кого")
+                    || lower.equals("выбран")) {
+                to = true;
             }
         }
-        return type && respondent && target;
+        return type && from && to;
     }
 
     private Parsed parseLong(List<String[]> rows, List<Participant> participants) {
@@ -263,21 +270,33 @@ public class ImportService {
         Set<String> codes = codes(participants);
         String[] header = rows.get(0);
         int typeColumn = indexOf(header, "type", "тип", "вид");
-        int fromColumn = indexOf(header, "respondent", "кто", "выбирает", "отвечает");
-        int toColumn = indexOf(header, "target", "кого", "выбран");
+        int fromColumn = indexOf(header, "from", "respondent", "кто", "выбирает", "отвечает");
+        int toColumn = indexOf(header, "to", "target", "кого", "выбран");
         int rankColumn = indexOf(header, "rank", "ранг", "место", "номер");
 
+        Set<String> answered = new LinkedHashSet<>();
         for (int i = 1; i < rows.size(); i++) {
             String[] row = rows.get(i);
-            if (value(row, fromColumn).isBlank() || value(row, toColumn).isBlank()) {
+            String from = value(row, fromColumn);
+            if (from.isBlank()) {
+                continue;
+            }
+            if (!codes.contains(from)) {
+                warnings.add("Строка " + (i + 1) + ": участник " + from + " в опросе не найден — пропущено");
+                continue;
+            }
+            String to = value(row, toColumn);
+            if (to.isBlank()) {
+                // строка без адресата — это «отвечал, но никого не выбрал».
+                // Без неё такой ответ неотличим от не ответившего.
+                answered.add(from);
                 continue;
             }
             String kindText = value(row, typeColumn).toUpperCase(Locale.ROOT);
             ChoiceKind kind = kindText.startsWith("ANTI") || kindText.startsWith("АНТИ")
                     ? ChoiceKind.ANTIPATHY : ChoiceKind.SYMPATHY;
-            String from = value(row, fromColumn);
-            String to = value(row, toColumn);
-            if (!codes.contains(from) || !codes.contains(to)) {
+            answered.add(from);
+            if (!codes.contains(to)) {
                 warnings.add("Строка " + (i + 1) + ": участник не найден (" + from + " -> " + to + ") — пропущено");
                 continue;
             }
@@ -285,15 +304,16 @@ public class ImportService {
                 warnings.add("Строка " + (i + 1) + ": выбор самого себя (" + from + ") — пропущено");
                 continue;
             }
-            Integer rank = parseInt(value(row, rankColumn));
+            Integer rank = parseRank(value(row, rankColumn), warnings, i + 1);
             entries.add(new SurveyDataEntry(kind, from, to, rank, 1));
         }
-        return new Parsed(entries, warnings);
+        return new Parsed(entries, warnings, answered);
     }
 
     private Parsed parseWide(List<String[]> rows, List<Participant> participants) {
         List<SurveyDataEntry> entries = new ArrayList<>();
         List<String> warnings = new ArrayList<>();
+        Set<String> answered = new LinkedHashSet<>();
         Set<String> codes = codes(participants);
         String[] header = rows.get(0);
         int kindColumn = indexOf(header, "type", "тип", "вид");
@@ -352,10 +372,16 @@ public class ImportService {
                 } else if (parsed > 1) {
                     // значение больше 1 трактуем как место в предпочтении
                     entries.add(new SurveyDataEntry(kind, from, to, parsed, 1));
+                } else if (parsed < 0 && parsed >= -3) {
+                    // -1..-3 — ранги антипатий в обратном порядке
+                    entries.add(new SurveyDataEntry(kind, from, to, parsed, 1));
                 }
             }
+            // строка респондента есть, даже если он ничего не выбрал:
+            // пустая строка в широком формате и есть ответ «никого»
+            answered.add(from);
         }
-        return new Parsed(entries, warnings);
+        return new Parsed(entries, warnings, answered);
     }
 
     private static Set<String> codes(List<Participant> participants) {
@@ -383,6 +409,22 @@ public class ImportService {
         return row[index].trim();
     }
 
+    /**
+     * Разбирает ранг. Отрицательные значения (-1, -2, -3) — это ранги антипатий
+     * в обратном порядке: -1 значит «ненавижу больше всех», -3 — последний.
+     */
+    private static Integer parseRank(String value, List<String> warnings, int line) {
+        Integer rank = parseInt(value);
+        if (rank != null && rank < 0) {
+            if (rank < -3) {
+                warnings.add("Строка " + line + ": ранг " + rank + " вне диапазона -1..-3 — пропущен");
+                return null;
+            }
+            return rank;
+        }
+        return rank;
+    }
+
     private static Integer parseInt(String value) {
         if (value == null || value.isBlank()) {
             return null;
@@ -397,6 +439,11 @@ public class ImportService {
     private record SurveyDataEntry(ChoiceKind kind, String from, String to, Integer rank, int weight) {
     }
 
-    private record Parsed(List<SurveyDataEntry> entries, List<String> warnings) {
+    private record Parsed(List<SurveyDataEntry> entries, List<String> warnings,
+                          Set<String> answered) {
+
+        private static Parsed of(List<SurveyDataEntry> entries, List<String> warnings) {
+            return new Parsed(entries, warnings, Set.of());
+        }
     }
 }

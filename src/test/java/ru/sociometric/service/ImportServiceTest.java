@@ -14,6 +14,7 @@ import ru.sociometric.domain.ChoiceKind;
 import ru.sociometric.dto.ImportResponse;
 import ru.sociometric.dto.ParticipantDto;
 import ru.sociometric.dto.SurveyRequest;
+import ru.sociometric.domain.Choice;
 import ru.sociometric.repository.ChoiceRepository;
 import ru.sociometric.web.BadRequestException;
 
@@ -37,6 +38,8 @@ class ImportServiceTest {
     private ImportService imports;
     @Autowired
     private ChoiceRepository choices;
+    @Autowired
+    private ru.sociometric.repository.ResponseMarkRepository responses;
 
     private Long surveyId;
 
@@ -69,6 +72,45 @@ class ImportServiceTest {
         assertThat(response.imported()).isEqualTo(3);
         assertThat(count(ChoiceKind.SYMPATHY)).isEqualTo(2);
         assertThat(count(ChoiceKind.ANTIPATHY)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("Канонические колонки From/To/Type/Rank и отрицательные ранги антипатий")
+    void canonicalHeadersAndNegativeRanks() {
+        ImportResponse response = imports.importChoices(surveyId, csv("canonical.csv", """
+                From,To,Type,Rank
+                1,2,SYMPATHY,1
+                2,3,ANTIPATHY,-1
+                """), false);
+
+        assertThat(response.imported()).isEqualTo(2);
+        Choice antipathy = choices.findBySurveyIdAndKindOrderById(surveyId, ChoiceKind.ANTIPATHY).get(0);
+        assertThat(antipathy.getRank()).isEqualTo(-1);
+        assertThat(antipathy.getRespondent()).isEqualTo("2");
+    }
+
+    @Test
+    @DisplayName("Строка с From и пустым To — это ответ «никого не выбрал», а не отсутствие ответа")
+    void blankTargetMarksAnsweredWithoutChoices() {
+        imports.importChoices(surveyId, csv("blank.csv", """
+                From,To,Type,Rank
+                1,2,SYMPATHY,1
+                3,,,,
+                """), false);
+
+        assertThat(responses.findBySurveyIdAndRespondent(surveyId, "3"))
+                .as("участник 3 отвечал, хотя никого не выбрал")
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("Шаблон открывается пустым: заголовок From,To,Type,Rank и комментарии, без строк-примеров")
+    void templateIsEmptyAndCanonical() {
+        String template = imports.buildTemplate(surveyId);
+
+        assertThat(template).startsWith("From,To,Type,Rank");
+        assertThat(template).contains("# По строке один выбор");
+        assertThat(template).doesNotContain("SYMPATHY,1");
     }
 
     @Test

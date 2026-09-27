@@ -25,10 +25,13 @@ package ru.sociometric.calculator;
  * @param indegree           входящая степень в том же графе
  * @param distances          матрица кратчайших расстояний (BFS), -1 если пути нет
  * @param meanDistance       средняя длина кратчайшего пути по достижимым парам
- * @param diameter           диаметр графа
- * @param radius             радиус графа
+ * @param diameter           диаметр графа; {@code null}, если граф несвязен
+ * @param radius             минимум эксцентриситетов среди вершин с конечным эксцентриситетом
+ * @param connectedComponents число связных компонент
+ * @param componentRadii     радиус каждой компоненты
+ * @param componentDiameters диаметр каждой компоненты
  * @param connectedPairs     число пар участников, между которыми есть путь
- * @param reachablePairs     общее число неупорядоченных пар
+ * @param possiblePairs      общее число неупорядоченных пар n(n-1)/2
  * @param strongest          самая тесная подгруппа (список кодов)
  * @param isolates           участники без единого выбора
  * @param stars              участники со статусом «звезда»
@@ -57,10 +60,13 @@ public record SociometricResult(
         int[] indegree,
         int[][] distances,
         double meanDistance,
-        int diameter,
+        Integer diameter,
         int radius,
+        int connectedComponents,
+        int[] componentRadii,
+        int[] componentDiameters,
         int connectedPairs,
-        int reachablePairs,
+        int possiblePairs,
         String[] strongest,
         String[] isolates,
         String[] stars,

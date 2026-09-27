@@ -65,6 +65,11 @@ public class DemoDataSeeder implements ApplicationRunner {
             entities.add(new Choice(surveyId, pair[0], pair[1], ChoiceKind.ANTIPATHY));
         }
         choices.saveAll(entities);
+        // отметки об ответе: 12-й участник отвечал, но никого не выбрал —
+        // без отметки он выглядел бы так же, как не ответивший
+        for (int i = 1; i <= 12; i++) {
+            surveyService.markResponded(surveyId, String.valueOf(i));
+        }
 
         List<ExpertRating> ratings = new ArrayList<>();
         ratings.addAll(expert(surveyId, "Психолог", new int[]{9, 8, 8, 6, 7, 5, 5, 4, 4, 3, 1, 0}));
@@ -93,7 +98,7 @@ public class DemoDataSeeder implements ApplicationRunner {
         return result;
     }
 
-    /** Симпатии: у 11 участника есть выборы, но его не выбирает никто; 12 — аутсайдер. */
+    /** Симпатии: 11 участника выбирают, но его никто не выбирает; 12 не выбрал никого. */
     private static String[][] sympathy() {
         return new String[][]{
                 {"1", "2"}, {"1", "3"}, {"1", "5"},

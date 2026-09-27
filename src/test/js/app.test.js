@@ -244,6 +244,16 @@ const addExpert = (name) => {
         assert.strictEqual(state().choices.length, before, 'выбор не вернулся');
     });
 
+    await check('при сохранении выборов отправляется код респондента', async () => {
+        requests.length = 0;
+        await vm.runInContext('persistChoices()', context);
+        const post = requests.find(r => r.method === 'POST' && /\/choices$/.test(r.url));
+        assert.ok(post, 'сохранение выборов не выполнено');
+        assert.ok('respondent' in post.body,
+            'без respondent сервер не отметит ответ, и «отвечал, но никого не выбрал» потеряется');
+        assert.equal(post.body.respondent, '1', 'отправлен не тот респондент, который сейчас выбран');
+    });
+
     await check('себя выбрать нельзя', () => {
         const before = state().choices.length;
         toggle('1', '1');
@@ -353,6 +363,24 @@ const addExpert = (name) => {
         const r = state().result;
         assert.ok('rejectedIndex' in r.indices, 'в индексах нет rejectedIndex');
         assert.ok('negativeStatusIndex' in r.indices, 'в индексах нет negativeStatusIndex');
+    });
+
+    await check('несвязный граф показывает прочерк вместо диаметра и число компонент', () => {
+        const r = state().result;
+        assert.ok(r.graph.connectedComponents > 1, 'в фикстуре должен быть несвязный граф');
+        assert.ok(!('diameter' in r.graph), 'диаметр несвязного графа не определён и не приходит числом');
+        assert.ok(Array.isArray(r.graph.componentRadii), 'нет радиусов по компонентам');
+        assert.equal(r.graph.componentRadii.length, r.graph.connectedComponents);
+    });
+
+    await check('категории статуса включают низкопринятых и «нет данных»', () => {
+        const counts = state().result.categoriesCount;
+        assert.ok('LOW_ACCEPTED' in counts, 'в разбивке нет LOW_ACCEPTED');
+        assert.ok('NO_DATA' in counts, 'в разбивке нет NO_DATA');
+        const ring = vm.runInContext('Soc.RING_ORDER', context);
+        assert.equal(ring.length, 8, 'в кольце социограммы должно быть 8 категорий');
+        assert.ok(ring.includes('LOW_ACCEPTED'), 'в кольце нет низкопринятых');
+        assert.ok(ring.includes('NO_DATA'), 'в кольце нет категории «нет данных»');
     });
 
     await check('социограмма строится по загруженному результату', () => {

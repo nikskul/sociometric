@@ -214,7 +214,52 @@ class SurveyApiTest {
 
         mvc.perform(get("/api/surveys/" + id + "/template.csv"))
                 .andExpect(status().isOk())
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("type,respondent,target")));
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("From,To,Type,Rank")))
+                .andExpect(content().string(org.hamcrest.Matchers.not(
+                        org.hamcrest.Matchers.containsString("SYMPATHY,"))));
+    }
+
+    @Test
+    @DisplayName("Ответ без выборов сохраняется как ответ, а не теряется")
+    void responseWithoutChoicesIsKept() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Пустой ответ");
+
+        // респондент 1 отвечает, но никого не выбирает
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"kind":"SYMPATHY","replace":true,"respondent":"1","choices":[]}"""))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/surveys/" + id + "/result"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.participants[0].responded").value(true))
+                .andExpect(jsonPath("$.participants[0].category").value("OUTSIDER"))
+                .andExpect(jsonPath("$.participants[1].responded").value(false))
+                .andExpect(jsonPath("$.participants[1].category").value("NO_DATA"));
+    }
+
+    @Test
+    @DisplayName("Несвязный граф: диаметр null, а не 0")
+    void disconnectedGraphHasNullDiameter() throws Exception {
+        MockMvc mvc = mvc();
+        long id = createSurvey(mvc, "Несвязный");
+
+        mvc.perform(post("/api/surveys/" + id + "/choices")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"kind":"SYMPATHY","replace":true,"choices":[
+                                  {"kind":"SYMPATHY","from":"1","to":"2","weight":1},
+                                  {"kind":"SYMPATHY","from":"3","to":"4","weight":1}]}"""))
+                .andExpect(status().isOk());
+
+        mvc.perform(get("/api/surveys/" + id + "/result"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.graph.diameter").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.graph.connectedComponents").value(2))
+                .andExpect(jsonPath("$.graph.connectedPairs").value(2))
+                .andExpect(jsonPath("$.graph.possiblePairs").value(6));
     }
 
     @Test

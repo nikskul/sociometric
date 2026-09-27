@@ -14,20 +14,25 @@ import ru.sociometric.domain.Choice;
 import ru.sociometric.domain.ChoiceKind;
 import ru.sociometric.domain.ExpertRating;
 import ru.sociometric.domain.Participant;
+import ru.sociometric.domain.ResponseMark;
 import ru.sociometric.domain.StatusCategory;
 import ru.sociometric.domain.Survey;
 import ru.sociometric.domain.Thresholds;
 import ru.sociometric.dto.ResultResponse;
 import ru.sociometric.dto.ThresholdsDto;
 import ru.sociometric.repository.ChoiceRepository;
+import ru.sociometric.repository.ResponseMarkRepository;
 import ru.sociometric.repository.ExpertRatingRepository;
 import ru.sociometric.web.BadRequestException;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Собирает результат расчёта для API: подтягивает данные опроса, считает
@@ -39,13 +44,16 @@ public class ResultService {
     private final SurveyService surveyService;
     private final ChoiceRepository choices;
     private final ExpertRatingRepository experts;
+    private final ResponseMarkRepository responses;
     private final AppProperties properties;
 
     public ResultService(SurveyService surveyService, ChoiceRepository choices,
-                         ExpertRatingRepository experts, AppProperties properties) {
+                         ExpertRatingRepository experts, ResponseMarkRepository responses,
+                         AppProperties properties) {
         this.surveyService = surveyService;
         this.choices = choices;
         this.experts = experts;
+        this.responses = responses;
         this.properties = properties;
     }
 
@@ -66,14 +74,20 @@ public class ResultService {
                     choice.getRespondent(), choice.getTarget(), choice.getRank(), choice.getWeight()));
         }
 
+        Set<String> responded = responses.findBySurveyId(surveyId).stream()
+                .map(ResponseMark::getRespondent)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
         SurveyData data = new SurveyData(participants, entries, survey.getChoicesLimit(),
-                survey.isRanks(), properties.formula());
+                survey.isRanks(), properties.formula(), responded);
         SociometricResult result = SociometricCalculator.calculate(data, thresholdsOf(survey),
                 subGroups(participants));
 
         ResultResponse.ParticipantResult[] participantResults = participantResults(participants, result);
         double mean = average(result.incoming());
         double sd = stdDev(result.incoming(), mean);
+        SociometricCalculator.Limits limits = SociometricCalculator.effectiveThresholds(
+                thresholdsOf(survey), mean, sd);
 
         return new ResultResponse(
                 surveyId, survey.getName(), result.n(), result.choicesLimit(),
@@ -90,8 +104,11 @@ public class ResultService {
                 List.of(result.isolates()),
                 List.of(result.strongest()),
                 new ResultResponse.GraphDto(result.meanDistance(), result.diameter(), result.radius(),
-                        result.connectedPairs(), result.reachablePairs(), result.distances()),
-                expertStats(survey, participants, result));
+                        result.connectedComponents(), result.componentRadii(), result.componentDiameters(),
+                        result.connectedPairs(), result.possiblePairs(), result.distances()),
+                expertStats(survey, participants, result),
+                properties.formula().name(),
+                limits.degenerate());
     }
 
     private StatusThresholds thresholdsOf(Survey survey) {
@@ -109,9 +126,10 @@ public class ResultService {
             return ThresholdsDto.from(survey.getThresholds());
         }
         double mean = average(result.incoming());
-        int[] limits = SociometricCalculator.effectiveThresholds(thresholdsOf(survey), mean,
-                stdDev(result.incoming(), mean));
-        return new ThresholdsDto(limits[0], limits[1], limits[2], limits[3]);
+        SociometricCalculator.Limits limits = SociometricCalculator.effectiveThresholds(
+                thresholdsOf(survey), mean, stdDev(result.incoming(), mean));
+        return new ThresholdsDto(limits.star(), limits.preferred(), limits.accepted(),
+                limits.mostRejected());
     }
 
     private ResultResponse.ParticipantResult[] participantResults(List<Participant> participants,
@@ -202,9 +220,12 @@ public class ResultService {
         for (int i = 0; i < participants.size(); i++) {
             String code = participants.get(i).code();
             double[] values = byCode.getOrDefault(code, new double[0]);
-            expertMeans[i] = ExpertAgreement.mean(values);
+            // кого не оценил ни один эксперт, того не считаем нулём: ноль — это оценка
+            // «самый непопулярный», и в корреляцию попал бы вымышленный балл
+            expertMeans[i] = values.length == 0 ? Double.NaN : ExpertAgreement.mean(values);
             scores.add(new ResultResponse.ParticipantScore(code, participants.get(i).name(),
-                    round4(expertMeans[i]), round4(ExpertAgreement.sd(values)),
+                    values.length == 0 ? null : round4(expertMeans[i]),
+                    values.length == 0 ? null : round4(ExpertAgreement.sd(values)),
                     values.length == 0 ? 0 : (int) Math.round(Arrays.stream(values).min().orElse(0)),
                     values.length == 0 ? 0 : (int) Math.round(Arrays.stream(values).max().orElse(0)),
                     values.length, result.incoming()[i]));
@@ -212,7 +233,8 @@ public class ResultService {
 
         Double pearson = ExpertAgreement.pearson(expertMeans, toDouble(result.incoming()));
         Double spearman = ExpertAgreement.spearman(expertMeans, toDouble(result.incoming()));
-        Double kendallW = ExpertAgreement.kendallW(matrix);
+        int[] kendallInfo = new int[2];
+        Double kendallW = ExpertAgreement.kendallW(matrix, kendallInfo);
 
         Map<String, Double> scoreByCode = new LinkedHashMap<>();
         for (int i = 0; i < participants.size(); i++) {
@@ -224,7 +246,8 @@ public class ResultService {
                     row.expertRank(), row.sociometricRank(), row.difference()));
         }
 
-        return new ResultResponse.ExpertDto(names, scores, kendallW, pearson, spearman, ranking);
+        return new ResultResponse.ExpertDto(names, scores, kendallW, pearson, spearman, ranking,
+                kendallInfo[0], kendallInfo[1]);
     }
 
     /**
