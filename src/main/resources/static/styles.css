@@ -111,6 +111,8 @@ fieldset legend { font-size: .8rem; color: var(--muted); padding: 0 6px; }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn-primary:hover { background: var(--accent-dark); }
+.btn-danger { color: var(--danger); border-color: #e5b8b4; }
+.btn-danger:hover { background: #fff1ef; }
 .btn-ghost { color: var(--muted); }
 .btn-small { padding: 3px 8px; font-size: .8rem; }
 .linklike { border: 0; background: none; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; padding: 0; }

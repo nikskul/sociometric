@@ -1377,6 +1377,14 @@ async function downloadFile(url, filename) {
     }
 }
 
+async function eraseSchoolData() {
+    const phrase = 'УДАЛИТЬ ВСЕ ДАННЫЕ';
+    if (prompt('Это удалит все опросы, участников и результаты этой установки без возможности восстановления. Введите «' + phrase + '» для подтверждения:') !== phrase) return;
+    await api('/api/admin/data?confirm=' + encodeURIComponent(phrase), {method: 'DELETE'});
+    await loadSurveys();
+    toast('Данные школы удалены');
+}
+
 function downloadTemplate() {
     if (!state.current) return;
     downloadFile(`/api/surveys/${state.current.id}/template.csv`, 'template.csv');
@@ -1590,6 +1598,8 @@ function bindEvents() {
     });
     $('#btnExportCsv').addEventListener('click', e => guard(e.currentTarget, () => exportResult('csv')));
     $('#btnExportXlsx').addEventListener('click', e => guard(e.currentTarget, () => exportResult('xlsx')));
+    $('#btnBackup').addEventListener('click', e => guard(e.currentTarget, () => downloadFile('/api/admin/backup', 'sociometric-backup.zip')));
+    $('#btnEraseSchool').addEventListener('click', e => guard(e.currentTarget, eraseSchoolData));
     $('#showAnti').addEventListener('change', renderResults);
     $('#onlyResponded').addEventListener('change', renderResults);
 

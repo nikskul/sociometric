@@ -1,5 +1,8 @@
 server:
   port: 8080
+  # Сетевая установка требует явного адреса и включённой аутентификации.
+  # По умолчанию приложение доступно только на этом компьютере.
+  address: ${SOCIOMETRIC_SERVER_ADDRESS:127.0.0.1}
   error:
     include-message: always
 
@@ -22,7 +25,7 @@ spring:
         format_sql: false
   h2:
     console:
-      enabled: true
+      enabled: ${SOCIOMETRIC_H2_CONSOLE_ENABLED:false}
       path: /h2-console
   jackson:
     default-property-inclusion: non_null
@@ -40,7 +43,11 @@ sociometric:
   #   mutual  - GSC = 2*M / (n*(n-1)), где M - число взаимных пар (классическая формула Морено)
   #   mutualDoublePass - GSC = sum(A[i][j]*A[j][i]) / (n*(n-1))
   gsc-formula: mutual
-  demo-data-on-startup: true
+  demo-data-on-startup: ${SOCIOMETRIC_DEMO_DATA_ON_STARTUP:true}
+  security:
+    enabled: ${SOCIOMETRIC_AUTH_ENABLED:false}
+    username: ${SOCIOMETRIC_ADMIN_USERNAME:}
+    password: ${SOCIOMETRIC_ADMIN_PASSWORD:}
 
 ---
 # Настольная сборка запускается без окна консоли, поэтому журнал нужен в файле.

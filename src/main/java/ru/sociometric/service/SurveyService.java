@@ -87,6 +87,7 @@ public class SurveyService {
         Survey survey = requireSurvey(id);
         choices.deleteBySurveyId(id);
         experts.deleteBySurveyId(id);
+        responses.deleteBySurveyId(id);
         surveys.delete(survey);
     }
 
